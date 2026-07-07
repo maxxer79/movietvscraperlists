@@ -1,0 +1,86 @@
+name: Build & Publish
+
+# Runs on every push to main. It:
+#   1. Bumps the build number (so the live site always shows a fresh version)
+#   2. Compiles the web + server (this is your "did it build?" confirmation)
+#   3. Builds a Docker image and publishes it to GitHub Container Registry (GHCR)
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # needed to commit the version bump back
+  packages: write # needed to push the image to GHCR
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Prevent an infinite loop: skip runs triggered by our own bump commit.
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Bump build number
+        run: node scripts/bump-version.mjs --build
+
+      - name: Read version
+        id: ver
+        run: |
+          echo "version=$(node -p "require('./version.json').version")" >> "$GITHUB_OUTPUT"
+          echo "build=$(node -p "require('./version.json').build")" >> "$GITHUB_OUTPUT"
+
+      - name: Compile (build confirmation)
+        run: |
+          npm run build:web
+          npm run build:server
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.json package.json
+          git commit -m "chore: build v${{ steps.ver.outputs.version }} (build ${{ steps.ver.outputs.build }}) [skip ci]" || echo "nothing to commit"
+          git push
+
+      - name: Lowercase image name
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.img.outputs.name }}:latest
+            ${{ steps.img.outputs.name }}:v${{ steps.ver.outputs.version }}
+            ${{ steps.img.outputs.name }}:build-${{ steps.ver.outputs.build }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

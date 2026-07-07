@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------------
+# MovieTVScraperLists — Docker Compose stack (for Portainer or `docker compose`)
+#
+# Two ways to run this:
+#   A) Pull a prebuilt image from GitHub Container Registry (recommended once
+#      GitHub Actions is set up):  set image: ghcr.io/OWNER/movietvscraperlists
+#   B) Build locally from source:  comment out `image:` and uncomment `build: .`
+# ---------------------------------------------------------------------------
+services:
+  movietv:
+    container_name: movietvscraperlists
+    # A) Prebuilt image (replace OWNER with your GitHub username/org, lowercase):
+    image: ghcr.io/OWNER/movietvscraperlists:latest
+    # B) Or build from the repo instead of pulling:
+    # build: .
+    restart: unless-stopped
+    environment:
+      PORT: "8088"
+      DATA_DIR: "/data"
+      HEADLESS: "true"
+      # Generate: node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+      SESSION_SECRET: "CHANGE-ME-to-a-long-random-string"
+      # Optional: password-protect the whole UI (leave blank to disable)
+      APP_PASSWORD: ""
+      ENABLED_PROVIDERS: "fandango,sony,moviesanywhere,universal"
+    volumes:
+      # Persists your saved logins + scraped libraries across restarts/updates
+      - movietv_data:/data
+    ports:
+      # host:container — Caddy will reverse-proxy to this host port
+      - "8088:8088"
+
+volumes:
+  movietv_data:

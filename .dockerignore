@@ -1,0 +1,16 @@
+node_modules
+**/node_modules
+dist
+**/dist
+web/dist
+server/dist
+data
+**/data
+.git
+.github
+*.log
+.env
+.env.*
+!.env.example
+README.md
+docs

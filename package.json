@@ -1,0 +1,26 @@
+{
+  "name": "movietvscraperlists",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Self-hosted scraper that lists movies & TV shows purchased across Fandango at Home, Sony Pictures Core, Movies Anywhere, and Universal Pictures.",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "bump": "node scripts/bump-version.mjs",
+    "dev:server": "npm run dev --workspace server",
+    "dev:web": "npm run dev --workspace web",
+    "dev": "concurrently -n server,web -c blue,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "build:web": "npm run build --workspace web",
+    "build:server": "npm run build --workspace server",
+    "build": "node scripts/bump-version.mjs --build && npm run build:web && npm run build:server",
+    "start": "node server/dist/index.js"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

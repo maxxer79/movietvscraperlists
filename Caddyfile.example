@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------------------
+# Example Caddy configuration to publish MovieTVScraperLists at your own URL.
+# Caddy automatically obtains + renews HTTPS certificates for real domains.
+#
+# Replace "movies.example.com" with your domain, and point the reverse_proxy
+# target at wherever the container is reachable from Caddy:
+#   - Same Docker network as Caddy:   movietvscraperlists:8088
+#   - Host-published port:            <docker-host-ip>:8088  (or localhost:8088)
+# ---------------------------------------------------------------------------
+
+movies.example.com {
+	encode zstd gzip
+
+	# If Caddy and the app share a Docker network, use the container name:
+	reverse_proxy movietvscraperlists:8088
+
+	# If instead you published the port on the host, use that address:
+	# reverse_proxy 127.0.0.1:8088
+}
+
+# ---------------------------------------------------------------------------
+# Local testing without a domain (self-signed cert on https://localhost):
+# ---------------------------------------------------------------------------
+# localhost {
+# 	reverse_proxy 127.0.0.1:8088
+# }

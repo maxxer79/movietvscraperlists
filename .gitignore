@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+**/dist/
+web/dist/
+server/dist/
+
+# Runtime data (scraped libraries, saved login sessions, screenshots)
+data/
+**/data/
+!**/src/**/data/
+
+# Secrets & environment
+.env
+.env.*
+!.env.example
+
+# Playwright
+playwright-report/
+test-results/
+.cache/
+ms-playwright/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
