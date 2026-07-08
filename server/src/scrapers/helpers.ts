@@ -52,6 +52,32 @@ export async function clickFirst(
   return true;
 }
 
+/**
+ * Dismiss a OneTrust-style cookie consent banner if present, so it can't
+ * intercept clicks on the real page. Best-effort and fast.
+ */
+export async function dismissCookieBanner(page: Page): Promise<void> {
+  const selectors = [
+    "#onetrust-accept-btn-handler",
+    "#onetrust-reject-all-handler",
+    ".onetrust-close-btn-handler",
+    'button:has-text("Accept All")',
+    'button:has-text("Accept")',
+  ];
+  for (const sel of selectors) {
+    try {
+      const el = page.locator(sel).first();
+      if (await el.isVisible({ timeout: 1200 })) {
+        await el.click({ timeout: 2000 });
+        await page.waitForTimeout(500);
+        return;
+      }
+    } catch {
+      /* try next */
+    }
+  }
+}
+
 /** Detect a page that is asking for a 2FA / verification code. */
 export async function looksLikeCodePrompt(page: Page): Promise<boolean> {
   const body = (await page.content()).toLowerCase();

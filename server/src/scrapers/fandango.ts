@@ -10,6 +10,7 @@ import {
   CODE_INPUT_SELECTORS,
   autoScroll,
   clickFirst,
+  dismissCookieBanner,
   dumpDebug,
   fillFirst,
   firstVisible,
@@ -24,33 +25,36 @@ const log = createLogger("fandango");
 /**
  * Fandango at Home (formerly Vudu).
  *
- * NOTE: These selectors are best-effort. Fandango's SPA changes over time, and
- * the exact login/library markup can't be verified without a live account. On
- * the first real login/scrape the provider dumps DOM + screenshots to
- * data/debug so the selectors below can be tuned quickly. Search the code for
- * "TUNE:" to find the spots most likely to need adjustment.
+ * Verified against the live site (athome.fandango.com):
+ *   - Login page has #email + #password on one page, submit button "Sign In".
+ *   - A OneTrust cookie banner overlays the page and must be dismissed first.
+ *   - The purchased library lives at /content/browse/mylibrary.
+ *
+ * The library card markup requires a logged-in session to inspect, so the card
+ * extraction below is defensive and dumps DOM + screenshots to data/debug on
+ * the first real sync. Search for "TUNE:" for spots that may need adjustment.
  */
 export class FandangoProvider implements Provider {
   readonly id = "fandango";
   readonly name = "Fandango at Home";
   readonly implemented = true;
-  readonly loginUrl = "https://www.fandangoathome.com/signin";
-  readonly libraryUrl = "https://www.fandangoathome.com/my-movies";
+  readonly loginUrl =
+    "https://athome.fandango.com/content/account/login?type=vudu_auth";
+  readonly libraryUrl = "https://athome.fandango.com/content/browse/mylibrary";
   readonly notes = "Formerly Vudu. May send an email verification code on new devices.";
 
   async startLogin(page: Page, creds: LoginCredentials): Promise<LoginStep> {
     await page.goto(this.loginUrl, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(1500);
+    await dismissCookieBanner(page);
 
-    // TUNE: email field
     const emailOk = await fillFirst(
       page,
       [
+        "#email",
+        'input[name="email"]',
+        'input[aria-label="Enter email"]',
         'input[type="email"]',
-        'input[name="email" i]',
-        'input[id*="email" i]',
-        'input[name="username" i]',
-        'input[autocomplete="username"]',
       ],
       creds.username
     );
@@ -63,22 +67,13 @@ export class FandangoProvider implements Provider {
       };
     }
 
-    // Some flows require pressing "Continue" before the password appears.
-    await clickFirst(
-      page,
-      ['button:has-text("Continue")', 'button:has-text("Next")'],
-      2500
-    ).catch(() => false);
-    await page.waitForTimeout(800);
-
-    // TUNE: password field
     const passOk = await fillFirst(
       page,
       [
+        "#password",
+        'input[name="password"]',
+        'input[aria-label="Enter password"]',
         'input[type="password"]',
-        'input[name="password" i]',
-        'input[id*="password" i]',
-        'input[autocomplete="current-password"]',
       ],
       creds.password
     );
@@ -90,16 +85,15 @@ export class FandangoProvider implements Provider {
       };
     }
 
-    // TUNE: submit button
+    // TUNE: submit button. "Sign In" is the primary action on this page.
     await clickFirst(page, [
-      'button[type="submit"]',
       'button:has-text("Sign In")',
       'button:has-text("Sign in")',
-      'button:has-text("Log In")',
+      'button[type="submit"]',
       'input[type="submit"]',
     ]);
 
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(3000);
     return this.evaluatePostAuth(page);
   }
 
@@ -152,15 +146,18 @@ export class FandangoProvider implements Provider {
   }
 
   async isLoggedIn(page: Page): Promise<boolean> {
-    // TUNE: signed-in indicators (account menu / avatar / "My Movies" link)
+    // If we're still on the login page, we're not signed in.
+    if (/\/content\/account\/login/i.test(page.url())) return false;
+    // A visible email/password form also means "not signed in".
+    if ((await firstVisible(page, ["#email", "#password"], 800)) !== null) return false;
+
     const sel = await firstVisible(
       page,
       [
-        'a[href*="my-movies" i]',
+        'a[href*="mylibrary" i]',
+        'a[href*="account/myinfo" i]',
         'a[href*="account" i]',
-        '[data-testid*="account" i]',
-        'button:has-text("Account")',
-        'text=/my movies/i',
+        'text=/my library/i',
       ],
       3000
     );
@@ -172,8 +169,9 @@ export class FandangoProvider implements Provider {
     try {
       await page.goto(this.libraryUrl, { waitUntil: "domcontentloaded" });
       await page.waitForTimeout(2500);
+      await dismissCookieBanner(page);
 
-      if (/signin|login/i.test(page.url()) || !(await this.isLoggedIn(page))) {
+      if (/\/content\/account\/login/i.test(page.url())) {
         throw new SessionExpiredError();
       }
 
