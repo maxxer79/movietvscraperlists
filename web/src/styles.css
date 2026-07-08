@@ -359,6 +359,11 @@ body {
   color: var(--accent);
   border-color: rgba(10, 132, 255, 0.3);
 }
+.chip-type {
+  color: var(--text);
+  border-color: var(--border-strong);
+  text-transform: capitalize;
+}
 
 /* ---------- Empty state ---------- */
 .empty {

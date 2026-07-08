@@ -26,6 +26,9 @@ export function MediaCard({
           {item.title}
         </p>
         <div className="media-sub">
+          {item.type !== "unknown" ? (
+            <span className="chip chip-type">{item.type === "movie" ? "Movie" : "TV"}</span>
+          ) : null}
           {item.year ? <span className="chip">{item.year}</span> : null}
           {item.quality ? (
             <span className={`chip ${is4k ? "chip-4k" : ""}`}>{item.quality}</span>

@@ -23,6 +23,7 @@ export function App() {
 
   const [search, setSearch] = useState("");
   const [filterProvider, setFilterProvider] = useState("all");
+  const [filterType, setFilterType] = useState("all");
   const [filterQuality, setFilterQuality] = useState("all");
   const [sort, setSort] = useState("title");
 
@@ -99,6 +100,7 @@ export function App() {
   const filtered = useMemo(() => {
     let list = items;
     if (filterProvider !== "all") list = list.filter((i) => i.provider === filterProvider);
+    if (filterType !== "all") list = list.filter((i) => i.type === filterType);
     if (filterQuality !== "all")
       list = list.filter((i) =>
         filterQuality === "4k"
@@ -116,7 +118,7 @@ export function App() {
       return a.title.localeCompare(b.title);
     });
     return sorted;
-  }, [items, filterProvider, filterQuality, search, sort]);
+  }, [items, filterProvider, filterType, filterQuality, search, sort]);
 
   function download(format: "csv" | "json") {
     const provider = filterProvider !== "all" ? filterProvider : undefined;
@@ -208,6 +210,15 @@ export function App() {
         </select>
         <select
           className="select"
+          value={filterType}
+          onChange={(e) => setFilterType(e.target.value)}
+        >
+          <option value="all">Movies &amp; TV</option>
+          <option value="movie">Movies only</option>
+          <option value="tv">TV only</option>
+        </select>
+        <select
+          className="select"
           value={filterQuality}
           onChange={(e) => setFilterQuality(e.target.value)}
         >
@@ -234,7 +245,9 @@ export function App() {
       </div>
 
       <p className="count-line">
-        Showing {filtered.length} of {items.length} titles
+        Showing {filtered.length} of {items.length} titles ·{" "}
+        {items.filter((i) => i.type === "movie").length} movies ·{" "}
+        {items.filter((i) => i.type === "tv").length} TV
       </p>
 
       {filtered.length === 0 ? (

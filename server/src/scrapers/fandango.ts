@@ -18,6 +18,12 @@ import {
   parseYear,
 } from "./helpers.js";
 import { createLogger } from "../logger.js";
+import {
+  extractVuduAuth,
+  fetchVuduLibrary,
+  releaseYear,
+  vuduDetailUrl,
+} from "./vuduApi.js";
 
 const log = createLogger("fandango");
 
@@ -172,76 +178,158 @@ export class FandangoProvider implements Provider {
 
   async scrapeLibrary(context: BrowserContext): Promise<MediaItem[]> {
     const page = await context.newPage();
-    const seen = new Set<string>();
-    const media: MediaItem[] = [];
     try {
-      for (const source of this.sources) {
-        await page.goto(source.url, { waitUntil: "domcontentloaded" });
-        await page.waitForTimeout(2500);
-        await dismissCookieBanner(page);
+      // Load the site so session cookies + localStorage are available.
+      await page.goto("https://athome.fandango.com/content/browse/mymovies", {
+        waitUntil: "domcontentloaded",
+      });
+      await page.waitForTimeout(2500);
+      await dismissCookieBanner(page);
 
-        if (/\/content\/account\/login/i.test(page.url())) {
-          throw new SessionExpiredError();
-        }
-
-        // The library uses infinite scroll; load everything before parsing.
-        await this.loadAll(page);
-        await dumpDebug(page, this.id, source.type);
-
-        const raws = await this.extractCards(page);
-        let added = 0;
-        for (const raw of raws) {
-          const title = (raw.title || "").trim();
-          if (!title) continue;
-          const key = `${source.type}:${(raw.href || title).toLowerCase()}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          media.push({
-            id: raw.href || `${source.type}:${title}`,
-            title,
-            type: source.type,
-            year: parseYear(title),
-            quality: parseQuality(raw.qualityText),
-            posterUrl: raw.poster,
-            url: raw.href,
-          });
-          added++;
-        }
-        log.info(`Fandango ${source.type}: parsed ${added} titles from ${source.url}`);
-        if (added === 0) {
-          log.warn(
-            `No ${source.type} titles parsed. See data/debug/fandango-${source.type}-*.html to tune selectors.`
-          );
-        }
+      if (/\/content\/account\/login/i.test(page.url())) {
+        throw new SessionExpiredError();
       }
 
-      log.info(`Scraped ${media.length} total items from Fandango at Home`);
-      return media;
+      const auth = await extractVuduAuth(page);
+      if (auth) {
+        log.info(`Using Vudu API (userId ${auth.userId.slice(0, 6)}…)`);
+        return this.scrapeViaApi(context, auth);
+      }
+
+      log.warn("No Vudu session in localStorage — falling back to DOM scroll scrape");
+      return this.scrapeViaDom(page);
     } finally {
       await page.close().catch(() => {});
     }
   }
 
-  /** Repeatedly scroll + click any "load more" control until the list stops growing. */
-  private async loadAll(page: Page): Promise<void> {
+  /** Paginated api.vudu.com contentSearch — reliable for 1000+ titles. listType rentedOrOwned excludes wishlist. */
+  private async scrapeViaApi(
+    context: BrowserContext,
+    auth: { sessionKey: string; userId: string }
+  ): Promise<MediaItem[]> {
+    const request = context.request;
+    const media: MediaItem[] = [];
+    const seen = new Set<string>();
+
+    for (const spec of [
+      { superType: "movies" as const, type: "movie" as const },
+      { superType: "tv" as const, type: "tv" as const },
+    ]) {
+      let rows = await fetchVuduLibrary(request, auth, {
+        superType: spec.superType,
+        listType: "rentedOrOwned",
+        claimedAppId: "html5app",
+      }).catch(async (err) => {
+        log.warn(`html5app failed for ${spec.superType}, retrying myvudu`, err);
+        return fetchVuduLibrary(request, auth, {
+          superType: spec.superType,
+          listType: "rentedOrOwned",
+          claimedAppId: "myvudu",
+        });
+      });
+
+      for (const row of rows) {
+        const key = `${spec.type}:${row.contentId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        media.push({
+          id: row.contentId,
+          title: row.title,
+          type: spec.type,
+          year: releaseYear(row.releaseTime),
+          quality: row.quality,
+          posterUrl: row.posterUrl,
+          url: vuduDetailUrl(row.title, row.contentId),
+        });
+      }
+      log.info(`Fandango API ${spec.type}: ${rows.length} titles`);
+    }
+
+    log.info(`Scraped ${media.length} total items via Vudu API`);
+    return media;
+  }
+
+  /** DOM fallback when API auth isn't available (virtualized grid — may miss titles). */
+  private async scrapeViaDom(page: Page): Promise<MediaItem[]> {
+    const seen = new Set<string>();
+    const media: MediaItem[] = [];
+    for (const source of this.sources) {
+      await page.goto(source.url, { waitUntil: "domcontentloaded" });
+      await page.waitForTimeout(2500);
+      await dismissCookieBanner(page);
+      if (/\/content\/account\/login/i.test(page.url())) {
+        throw new SessionExpiredError();
+      }
+      const raws = await this.collectWhileScrolling(page, source.type);
+      await dumpDebug(page, this.id, source.type);
+      for (const raw of raws) {
+        const title = (raw.title || "").trim();
+        if (!title) continue;
+        const key = `${source.type}:${(raw.href || title).toLowerCase()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        media.push({
+          id: raw.href || `${source.type}:${title}`,
+          title,
+          type: source.type,
+          year: parseYear(title),
+          quality: parseQuality(raw.qualityText),
+          posterUrl: raw.poster,
+          url: raw.href,
+        });
+      }
+    }
+    return media;
+  }
+
+  /**
+   * Harvest every tile from a virtualized/infinite-scroll grid. Each pass reads
+   * the currently-rendered tiles, merges them into a running map (keyed by
+   * detail URL), then scrolls the real container forward. Stops when no new
+   * tiles appear for several consecutive passes.
+   */
+  private async collectWhileScrolling(
+    page: Page,
+    sourceType: string
+  ): Promise<Array<Record<string, string | undefined>>> {
+    const collected = new Map<string, Record<string, string | undefined>>();
     let stable = 0;
-    let lastCount = -1;
-    for (let i = 0; i < 200 && stable < 4; i++) {
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    for (let i = 0; i < 800 && stable < 10; i++) {
+      const batch = await this.extractCards(page);
+      let fresh = 0;
+      for (const raw of batch) {
+        const key = (raw.href || raw.title || "").toLowerCase();
+        if (key && !collected.has(key)) {
+          collected.set(key, raw);
+          fresh++;
+        }
+      }
+
       await clickFirst(
         page,
         ['button:has-text("Load More")', 'button:has-text("Show More")'],
-        400
+        250
       ).catch(() => false);
-      await page.waitForTimeout(700);
-      const count = await page.evaluate(
-        () =>
-          document.querySelectorAll('a[href*="/content/browse/details/"]').length
-      );
-      if (count === lastCount) stable++;
+
+      // Scroll the last rendered tile into view; scrollIntoView walks up and
+      // scrolls whatever ancestor is actually scrollable (window or inner div).
+      await page.evaluate(() => {
+        const tiles = document.querySelectorAll('a[href*="/content/browse/details/"]');
+        const last = tiles[tiles.length - 1] as HTMLElement | undefined;
+        if (last) last.scrollIntoView({ block: "end", behavior: "instant" as ScrollBehavior });
+        window.scrollBy(0, Math.round(window.innerHeight * 0.9));
+      });
+      await page.waitForTimeout(650);
+
+      if (fresh === 0) stable++;
       else stable = 0;
-      lastCount = count;
+      if (i % 15 === 0) {
+        log.info(`Fandango ${sourceType}: collected ${collected.size} tiles so far…`);
+      }
     }
+    log.info(`Fandango ${sourceType}: finished with ${collected.size} tiles`);
+    return [...collected.values()];
   }
 
   /** TUNE: extract title/poster/link/quality from library tiles. */

@@ -1,7 +1,7 @@
 {
   "name": "movietvscraperlists",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Self-hosted scraper that lists movies & TV shows purchased across Fandango at Home, Sony Pictures Core, Movies Anywhere, and Universal Pictures.",
   "workspaces": [
     "server",
