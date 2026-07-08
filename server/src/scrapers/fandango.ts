@@ -8,7 +8,6 @@ import {
 } from "./types.js";
 import {
   CODE_INPUT_SELECTORS,
-  autoScroll,
   clickFirst,
   dismissCookieBanner,
   dumpDebug,
@@ -40,8 +39,15 @@ export class FandangoProvider implements Provider {
   readonly implemented = true;
   readonly loginUrl =
     "https://athome.fandango.com/content/account/login?type=vudu_auth";
-  readonly libraryUrl = "https://athome.fandango.com/content/browse/mylibrary";
+  readonly libraryUrl = "https://athome.fandango.com/content/browse/mymovies";
   readonly notes = "Formerly Vudu. May send an email verification code on new devices.";
+
+  // Your purchased library lives on two dedicated pages. We scrape ONLY these,
+  // so wishlist and other lists are ignored.
+  private readonly sources: Array<{ url: string; type: "movie" | "tv" }> = [
+    { url: "https://athome.fandango.com/content/browse/mymovies", type: "movie" },
+    { url: "https://athome.fandango.com/content/browse/mytv", type: "tv" },
+  ];
 
   async startLogin(page: Page, creds: LoginCredentials): Promise<LoginStep> {
     await page.goto(this.loginUrl, { waitUntil: "domcontentloaded" });
@@ -166,83 +172,128 @@ export class FandangoProvider implements Provider {
 
   async scrapeLibrary(context: BrowserContext): Promise<MediaItem[]> {
     const page = await context.newPage();
+    const seen = new Set<string>();
+    const media: MediaItem[] = [];
     try {
-      await page.goto(this.libraryUrl, { waitUntil: "domcontentloaded" });
-      await page.waitForTimeout(2500);
-      await dismissCookieBanner(page);
+      for (const source of this.sources) {
+        await page.goto(source.url, { waitUntil: "domcontentloaded" });
+        await page.waitForTimeout(2500);
+        await dismissCookieBanner(page);
 
-      if (/\/content\/account\/login/i.test(page.url())) {
-        throw new SessionExpiredError();
-      }
-
-      await autoScroll(page);
-      await dumpDebug(page, this.id, "library");
-
-      // TUNE: the card container + inner fields.
-      const items = await page.evaluate(() => {
-        const results: Array<Record<string, string | undefined>> = [];
-        const cardSelectors = [
-          '[data-testid*="poster" i]',
-          '[class*="poster" i]',
-          '[class*="movie-card" i]',
-          '[class*="content-card" i]',
-          'a[href*="/content/movies/"]',
-        ];
-        let cards: Element[] = [];
-        for (const cs of cardSelectors) {
-          const found = Array.from(document.querySelectorAll(cs));
-          if (found.length > cards.length) cards = found;
+        if (/\/content\/account\/login/i.test(page.url())) {
+          throw new SessionExpiredError();
         }
-        for (const card of cards) {
-          const img = card.querySelector("img");
-          const title =
-            img?.getAttribute("alt") ||
-            (card.querySelector('[class*="title" i]') as HTMLElement)?.innerText ||
-            (card as HTMLElement).getAttribute("aria-label") ||
-            undefined;
-          const poster =
-            img?.getAttribute("src") || img?.getAttribute("data-src") || undefined;
-          const href =
-            (card as HTMLAnchorElement).href ||
-            (card.querySelector("a") as HTMLAnchorElement)?.href ||
-            undefined;
-          const qualityText =
-            (card.querySelector('[class*="quality" i]') as HTMLElement)?.innerText ||
-            (card.querySelector('[class*="badge" i]') as HTMLElement)?.innerText ||
-            undefined;
-          if (title) {
-            results.push({ title: title.trim(), poster, href, qualityText });
-          }
+
+        // The library uses infinite scroll; load everything before parsing.
+        await this.loadAll(page);
+        await dumpDebug(page, this.id, source.type);
+
+        const raws = await this.extractCards(page);
+        let added = 0;
+        for (const raw of raws) {
+          const title = (raw.title || "").trim();
+          if (!title) continue;
+          const key = `${source.type}:${(raw.href || title).toLowerCase()}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          media.push({
+            id: raw.href || `${source.type}:${title}`,
+            title,
+            type: source.type,
+            year: parseYear(title),
+            quality: parseQuality(raw.qualityText),
+            posterUrl: raw.poster,
+            url: raw.href,
+          });
+          added++;
         }
-        return results;
-      });
-
-      const seen = new Set<string>();
-      const media: MediaItem[] = [];
-      for (const raw of items) {
-        const title = (raw.title || "").trim();
-        if (!title || seen.has(title.toLowerCase())) continue;
-        seen.add(title.toLowerCase());
-        media.push({
-          id: raw.href || title,
-          title,
-          type: "unknown",
-          year: parseYear(title),
-          quality: parseQuality(raw.qualityText),
-          posterUrl: raw.poster,
-          url: raw.href,
-        });
+        log.info(`Fandango ${source.type}: parsed ${added} titles from ${source.url}`);
+        if (added === 0) {
+          log.warn(
+            `No ${source.type} titles parsed. See data/debug/fandango-${source.type}-*.html to tune selectors.`
+          );
+        }
       }
 
-      log.info(`Scraped ${media.length} items from Fandango at Home`);
-      if (media.length === 0) {
-        log.warn(
-          "No items parsed. Check data/debug for the library DOM dump to tune selectors."
-        );
-      }
+      log.info(`Scraped ${media.length} total items from Fandango at Home`);
       return media;
     } finally {
       await page.close().catch(() => {});
     }
+  }
+
+  /** Repeatedly scroll + click any "load more" control until the list stops growing. */
+  private async loadAll(page: Page): Promise<void> {
+    let stable = 0;
+    let lastCount = -1;
+    for (let i = 0; i < 200 && stable < 4; i++) {
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await clickFirst(
+        page,
+        ['button:has-text("Load More")', 'button:has-text("Show More")'],
+        400
+      ).catch(() => false);
+      await page.waitForTimeout(700);
+      const count = await page.evaluate(
+        () =>
+          document.querySelectorAll('a[href*="/content/browse/details/"]').length
+      );
+      if (count === lastCount) stable++;
+      else stable = 0;
+      lastCount = count;
+    }
+  }
+
+  /** TUNE: extract title/poster/link/quality from library tiles. */
+  private extractCards(page: Page) {
+    return page.evaluate(() => {
+      const out: Array<Record<string, string | undefined>> = [];
+      // Fandango library tiles are anchors to /content/browse/details/<Title>/<id>
+      // wrapping an <img alt="Title">.
+      let cards: Element[] = Array.from(
+        document.querySelectorAll('a[href*="/content/browse/details/"]')
+      );
+      // Fallback: any poster image with alt text.
+      if (cards.length === 0) {
+        cards = Array.from(document.querySelectorAll("img[alt]")).filter(
+          (img) => (img as HTMLImageElement).alt.trim().length > 0
+        );
+      }
+      for (const card of cards) {
+        const img = card.matches("img") ? (card as HTMLImageElement) : card.querySelector("img");
+        const anchor = (card.matches("a") ? card : card.closest("a")) as HTMLAnchorElement | null;
+        // Derive a title from the URL slug as a last resort:
+        // /content/browse/details/The%20Matrix/12345 -> "The Matrix"
+        let urlTitle: string | undefined;
+        const href0 = anchor?.getAttribute("href") || "";
+        const m = href0.match(/\/details\/([^/]+)\/[^/]+\/?$/);
+        if (m) {
+          try {
+            urlTitle = decodeURIComponent(m[1]).replace(/[-_]+/g, " ").trim();
+          } catch {
+            urlTitle = m[1].replace(/[-_]+/g, " ").trim();
+          }
+        }
+        const title =
+          img?.getAttribute("alt") ||
+          (card.querySelector('[class*="title" i]') as HTMLElement)?.innerText ||
+          card.getAttribute("aria-label") ||
+          anchor?.getAttribute("aria-label") ||
+          urlTitle ||
+          undefined;
+        const poster =
+          img?.getAttribute("src") || img?.getAttribute("data-src") || undefined;
+        const href = anchor?.href || undefined;
+        const container = anchor || card;
+        const qualityText =
+          (container.querySelector('[class*="quality" i]') as HTMLElement)?.innerText ||
+          (container.querySelector('[class*="badge" i]') as HTMLElement)?.innerText ||
+          (container.textContent?.match(/\b(4K|UHD|HDX|HD|SD)\b/)?.[0] ?? undefined);
+        if (title && title.trim()) {
+          out.push({ title: title.trim(), poster, href, qualityText });
+        }
+      }
+      return out;
+    });
   }
 }
