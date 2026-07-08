@@ -71,13 +71,18 @@ export function App() {
     setBusyId(id);
     try {
       const start = await api.scrape(id);
+      if (!start.jobId) {
+        throw new Error("Server did not return a sync job — rebuild and redeploy the app");
+      }
       toast(`${name}: syncing library — this may take a few minutes…`);
 
       const deadline = Date.now() + 15 * 60 * 1000;
       while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2000));
         const status = await api.scrapeStatus(id, start.jobId);
-        if (status.status === "running") continue;
+        if (status.status === "running") {
+          await new Promise((r) => setTimeout(r, 2000));
+          continue;
+        }
 
         if (status.status === "done") {
           toast(`${name}: synced ${status.count ?? status.snapshot?.count ?? 0} titles`);

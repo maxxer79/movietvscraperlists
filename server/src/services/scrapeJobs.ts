@@ -1,12 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { getProvider } from "../scrapers/registry.js";
 import { SessionExpiredError } from "../scrapers/types.js";
 import { newContext } from "./browser.js";
 import { saveLibrary, type LibrarySnapshot } from "./libraryStore.js";
 import { clearSession, loadSession } from "./sessionStore.js";
+import { paths } from "./paths.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("scrape-jobs");
+const jobsDir = () => join(paths.data, "scrape-jobs");
+const JOB_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface ScrapeJob {
   id: string;
@@ -24,25 +29,125 @@ export interface ScrapeJob {
 const jobs = new Map<string, ScrapeJob>();
 const activeByProvider = new Map<string, string>();
 
-function cleanupOldJobs() {
-  const cutoff = Date.now() - 60 * 60 * 1000;
-  for (const [id, job] of jobs) {
-    if (job.status === "running") continue;
-    const finished = job.finishedAt ? Date.parse(job.finishedAt) : Date.parse(job.startedAt);
-    if (finished < cutoff) jobs.delete(id);
+function jobFile(jobId: string) {
+  return join(jobsDir(), `${jobId}.json`);
+}
+
+function persistJob(job: ScrapeJob): void {
+  writeFileSync(jobFile(job.id), JSON.stringify(job, null, 2), "utf8");
+}
+
+function loadJobFromDisk(jobId: string): ScrapeJob | null {
+  const f = jobFile(jobId);
+  if (!existsSync(f)) return null;
+  try {
+    return JSON.parse(readFileSync(f, "utf8")) as ScrapeJob;
+  } catch {
+    return null;
   }
 }
 
+function rememberJob(job: ScrapeJob): void {
+  jobs.set(job.id, job);
+  persistJob(job);
+}
+
+function cleanupOldJobs() {
+  const cutoff = Date.now() - JOB_TTL_MS;
+  for (const [id, job] of jobs) {
+    if (job.status === "running") continue;
+    const finished = job.finishedAt ? Date.parse(job.finishedAt) : Date.parse(job.startedAt);
+    if (finished < cutoff) {
+      jobs.delete(id);
+      try {
+        rmSync(jobFile(id));
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  if (!existsSync(jobsDir())) return;
+  for (const name of readdirSync(jobsDir())) {
+    if (!name.endsWith(".json")) continue;
+    const f = join(jobsDir(), name);
+    try {
+      const job = JSON.parse(readFileSync(f, "utf8")) as ScrapeJob;
+      if (job.status === "running") continue;
+      const finished = job.finishedAt ? Date.parse(job.finishedAt) : Date.parse(job.startedAt);
+      if (finished < cutoff) rmSync(f);
+    } catch {
+      /* ignore bad files */
+    }
+  }
+}
+
+/** Warm the in-memory cache from disk on first lookup after a restart. */
+function hydrateJob(jobId: string): ScrapeJob | null {
+  const cached = jobs.get(jobId);
+  if (cached) return cached;
+  const disk = loadJobFromDisk(jobId);
+  if (disk) jobs.set(disk.id, disk);
+  return disk;
+}
+
 export function getScrapeJob(jobId: string): ScrapeJob | null {
-  return jobs.get(jobId) ?? null;
+  return hydrateJob(jobId);
 }
 
 export function getActiveScrapeJob(providerId: string): ScrapeJob | null {
   const jobId = activeByProvider.get(providerId);
-  if (!jobId) return null;
-  const job = jobs.get(jobId);
-  if (!job || job.status !== "running") return null;
-  return job;
+  if (jobId) {
+    const job = hydrateJob(jobId);
+    if (job?.status === "running") return job;
+  }
+
+  if (!existsSync(jobsDir())) return null;
+  let latest: ScrapeJob | null = null;
+  for (const name of readdirSync(jobsDir())) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const job = JSON.parse(readFileSync(join(jobsDir(), name), "utf8")) as ScrapeJob;
+      if (job.providerId !== providerId || job.status !== "running") continue;
+      if (!latest || job.startedAt > latest.startedAt) latest = job;
+    } catch {
+      /* ignore */
+    }
+  }
+  if (latest) jobs.set(latest.id, latest);
+  return latest;
+}
+
+/** Most recent job for a provider (running or recently finished). */
+export function getLatestScrapeJob(providerId: string): ScrapeJob | null {
+  let latest: ScrapeJob | null = null;
+
+  for (const job of jobs.values()) {
+    if (job.providerId !== providerId) continue;
+    if (!latest || job.startedAt > latest.startedAt) latest = job;
+  }
+
+  if (!existsSync(jobsDir())) return latest;
+  for (const name of readdirSync(jobsDir())) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const job = JSON.parse(readFileSync(join(jobsDir(), name), "utf8")) as ScrapeJob;
+      if (job.providerId !== providerId) continue;
+      if (!latest || job.startedAt > latest.startedAt) latest = job;
+    } catch {
+      /* ignore */
+    }
+  }
+  if (latest) jobs.set(latest.id, latest);
+  return latest;
+}
+
+export function resolveScrapeJob(providerId: string, jobId?: string): ScrapeJob | null {
+  if (jobId) {
+    const direct = getScrapeJob(jobId);
+    if (direct && direct.providerId === providerId) return direct;
+  }
+  return getActiveScrapeJob(providerId) ?? getLatestScrapeJob(providerId);
 }
 
 export function startScrapeJob(providerId: string): ScrapeJob {
@@ -50,7 +155,7 @@ export function startScrapeJob(providerId: string): ScrapeJob {
 
   const existingId = activeByProvider.get(providerId);
   if (existingId) {
-    const existing = jobs.get(existingId);
+    const existing = hydrateJob(existingId);
     if (existing?.status === "running") return existing;
   }
 
@@ -68,7 +173,7 @@ export function startScrapeJob(providerId: string): ScrapeJob {
     message: "Starting library sync…",
     startedAt: new Date().toISOString(),
   };
-  jobs.set(job.id, job);
+  rememberJob(job);
   activeByProvider.set(providerId, job.id);
 
   void runScrapeJob(job, provider, state).catch((err) => {
@@ -78,6 +183,11 @@ export function startScrapeJob(providerId: string): ScrapeJob {
   return job;
 }
 
+function updateJob(job: ScrapeJob, patch: Partial<ScrapeJob>): void {
+  Object.assign(job, patch);
+  rememberJob(job);
+}
+
 async function runScrapeJob(
   job: ScrapeJob,
   provider: NonNullable<ReturnType<typeof getProvider>>,
@@ -85,26 +195,38 @@ async function runScrapeJob(
 ): Promise<void> {
   const context = await newContext(storageState);
   try {
-    job.message = "Fetching your library — large collections may take a few minutes…";
+    updateJob(job, {
+      message: "Fetching your library — large collections may take a few minutes…",
+    });
     const items = await provider.scrapeLibrary(context);
     const snapshot = saveLibrary(provider.id, items);
-    job.status = "done";
-    job.count = snapshot.count;
-    job.snapshot = snapshot;
-    job.message = `Synced ${snapshot.count} titles`;
-    job.finishedAt = new Date().toISOString();
+    updateJob(job, {
+      status: "done",
+      count: snapshot.count,
+      snapshot,
+      message: `Synced ${snapshot.count} titles`,
+      finishedAt: new Date().toISOString(),
+    });
     log.info(`${provider.id} scrape job ${job.id} finished: ${snapshot.count} items`);
   } catch (err) {
-    job.status = "error";
-    job.finishedAt = new Date().toISOString();
+    const finishedAt = new Date().toISOString();
     if (err instanceof SessionExpiredError) {
       clearSession(provider.id);
-      job.sessionExpired = true;
-      job.error = err.message;
-      job.message = err.message;
+      updateJob(job, {
+        status: "error",
+        sessionExpired: true,
+        error: err.message,
+        message: err.message,
+        finishedAt,
+      });
     } else {
-      job.error = (err as Error).message;
-      job.message = job.error;
+      const message = (err as Error).message;
+      updateJob(job, {
+        status: "error",
+        error: message,
+        message,
+        finishedAt,
+      });
     }
     log.error(`${provider.id} scrape job ${job.id} failed`, err);
   } finally {

@@ -7,6 +7,7 @@ export const paths = {
   sessions: join(config.dataDir, "sessions"),
   library: join(config.dataDir, "library"),
   debug: join(config.dataDir, "debug"),
+  scrapeJobs: join(config.dataDir, "scrape-jobs"),
 };
 
 export function ensureDataDirs() {

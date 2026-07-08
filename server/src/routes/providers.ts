@@ -5,8 +5,7 @@ import { hasSession, clearSession } from "../services/sessionStore.js";
 import { loadLibrary } from "../services/libraryStore.js";
 import { startLogin, submitInput, cancelLogin } from "../scrapers/loginController.js";
 import {
-  getActiveScrapeJob,
-  getScrapeJob,
+  resolveScrapeJob,
   startScrapeJob,
 } from "../services/scrapeJobs.js";
 import { createLogger } from "../logger.js";
@@ -120,9 +119,9 @@ providersRouter.get("/:id/scrape/status", (req, res) => {
   const provider = getProvider(req.params.id);
   if (!provider) return res.status(404).json({ error: "Unknown provider" });
 
-  const jobId = req.query.jobId as string | undefined;
-  const job = jobId ? getScrapeJob(jobId) : getActiveScrapeJob(provider.id);
-  if (!job || job.providerId !== provider.id) {
+  const jobId = typeof req.query.jobId === "string" ? req.query.jobId : undefined;
+  const job = resolveScrapeJob(provider.id, jobId);
+  if (!job) {
     return res.status(404).json({ error: "No scrape job found." });
   }
 

@@ -71,10 +71,22 @@ export const api = {
       `/api/providers/${id}/scrape`,
       { method: "POST" }
     ),
-  scrapeStatus: (id: string, jobId: string) =>
-    req<ScrapeJobStatus>(
-      `/api/providers/${id}/scrape/status?jobId=${encodeURIComponent(jobId)}`
-    ),
+  scrapeStatus: async (id: string, jobId: string) => {
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        return await req<ScrapeJobStatus>(
+          `/api/providers/${id}/scrape/status?jobId=${encodeURIComponent(jobId)}`
+        );
+      } catch (e) {
+        lastErr = e as Error;
+        const status = (e as Error & { status?: number }).status;
+        if (status !== 404 || attempt === 4) throw e;
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      }
+    }
+    throw lastErr ?? new Error("Could not read sync status");
+  },
   library: () =>
     req<{ count: number; items: CombinedItem[] }>("/api/library"),
   exportUrl: (format: "csv" | "json", provider?: string) => {
