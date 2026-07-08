@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, clearToken } from "./api";
-import type { CombinedItem, ProviderStatus } from "./types";
+import type { CombinedItem, ProviderStatus, SyncProgress } from "./types";
 import { VersionBadge } from "./components/VersionBadge";
 import { ProviderCard } from "./components/ProviderCard";
 import { LoginModal } from "./components/LoginModal";
@@ -19,6 +19,7 @@ export function App() {
   const [items, setItems] = useState<CombinedItem[]>([]);
   const [loginProvider, setLoginProvider] = useState<ProviderStatus | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [syncProgress, setSyncProgress] = useState<Record<string, SyncProgress>>({});
   const [toasts, setToasts] = useState<{ id: number; msg: string }[]>([]);
 
   const [search, setSearch] = useState("");
@@ -69,6 +70,14 @@ export function App() {
 
   async function scrape(id: string, name: string) {
     setBusyId(id);
+    setSyncProgress((s) => ({
+      ...s,
+      [id]: {
+        message: "Starting sync…",
+        logLines: [],
+        showLog: s[id]?.showLog ?? false,
+      },
+    }));
     try {
       const start = await api.scrape(id);
       if (!start.jobId) {
@@ -83,12 +92,32 @@ export function App() {
           status = await api.scrapeStatus(id, start.jobId);
         } catch (e) {
           if ((e as Error).message === "Failed to fetch") {
+            setSyncProgress((s) => ({
+              ...s,
+              [id]: {
+                ...s[id],
+                message: "Connection interrupted — retrying…",
+                logLines: s[id]?.logLines ?? [],
+                showLog: s[id]?.showLog ?? false,
+              },
+            }));
             toast(`${name}: connection interrupted — retrying…`);
             await new Promise((r) => setTimeout(r, 3000));
             continue;
           }
           throw e;
         }
+
+        setSyncProgress((s) => ({
+          ...s,
+          [id]: {
+            message: status.message,
+            itemsFound: status.itemsFound,
+            logLines: status.logLines ?? s[id]?.logLines ?? [],
+            startedAt: status.startedAt ?? s[id]?.startedAt,
+            showLog: s[id]?.showLog ?? false,
+          },
+        }));
 
         if (status.status === "running") {
           await new Promise((r) => setTimeout(r, 2000));
@@ -119,7 +148,24 @@ export function App() {
       }
     } finally {
       setBusyId(null);
+      setSyncProgress((s) => {
+        const next = { ...s };
+        delete next[id];
+        return next;
+      });
     }
+  }
+
+  function toggleSyncLog(id: string) {
+    setSyncProgress((s) => ({
+      ...s,
+      [id]: {
+        ...s[id],
+        message: s[id]?.message ?? "Syncing…",
+        logLines: s[id]?.logLines ?? [],
+        showLog: !s[id]?.showLog,
+      },
+    }));
   }
 
   async function disconnect(id: string, name: string) {
@@ -217,9 +263,11 @@ export function App() {
             key={p.id}
             provider={p}
             busy={busyId === p.id}
+            syncProgress={syncProgress[p.id]}
             onConnect={() => setLoginProvider(p)}
             onScrape={() => scrape(p.id, p.name)}
             onDisconnect={() => disconnect(p.id, p.name)}
+            onToggleLog={() => toggleSyncLog(p.id)}
           />
         ))}
       </section>

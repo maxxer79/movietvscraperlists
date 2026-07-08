@@ -122,6 +122,7 @@ interface FetchLibraryOpts {
   superType: "movies" | "tv";
   listType?: string;
   claimedAppId?: string;
+  onPage?: (info: { superType: string; page: number; batchSize: number; total: number }) => void;
 }
 
 function assertVuduOk(data: Record<string, unknown>, context: string): void {
@@ -213,6 +214,7 @@ export async function fetchVuduLibrary(
 
     const moreBelow = vuduStr(data, "moreBelow");
     pages++;
+    opts.onPage?.({ superType: opts.superType, page: pages, batchSize: batch.length, total: out.length });
     log.info(
       `${opts.superType} page ${pages}: +${batch.length} (total ${out.length}), moreBelow=${moreBelow}`
     );

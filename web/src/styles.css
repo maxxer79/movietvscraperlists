@@ -216,6 +216,56 @@ body {
   font-size: 12.5px;
   color: var(--text-faint);
 }
+.sync-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sync-status {
+  margin: 0;
+  color: var(--accent);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sync-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+.sync-log-toggle {
+  appearance: none;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  width: fit-content;
+}
+.sync-log-toggle:hover {
+  text-decoration: underline;
+}
+.sync-log {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .provider-actions {
   display: flex;
   gap: 8px;

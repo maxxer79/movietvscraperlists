@@ -212,19 +212,22 @@ export class FandangoProvider implements Provider {
    */
   async scrapeFromStorageState(
     storageStateJson: string,
-    onProgress?: (message: string) => void
+    onProgress?: (message: string, itemsFound?: number) => void
   ): Promise<MediaItem[] | null> {
     const auth = extractVuduAuthFromStorageState(storageStateJson);
-    if (!auth) return null;
+    if (!auth) {
+      onProgress?.("Could not read Vudu credentials from saved session");
+      return null;
+    }
     log.info(`Light Vudu API sync (userId ${auth.userId.slice(0, 6)}…)`);
-    onProgress?.("Fetching library via Vudu API…");
+    onProgress?.("Using fast API sync (no browser)…", 0);
     return this.scrapeViaApi(auth, onProgress);
   }
 
   /** Paginated api.vudu.com contentSearch — reliable for 1000+ titles. listType rentedOrOwned excludes wishlist. */
   private async scrapeViaApi(
     auth: { sessionKey: string; userId: string },
-    onProgress?: (message: string) => void
+    onProgress?: (message: string, itemsFound?: number) => void
   ): Promise<MediaItem[]> {
     const media: MediaItem[] = [];
     const seen = new Set<string>();
@@ -233,18 +236,22 @@ export class FandangoProvider implements Provider {
       { superType: "movies" as const, type: "movie" as const },
       { superType: "tv" as const, type: "tv" as const },
     ]) {
-      onProgress?.(`Fetching ${spec.type}…`);
-      let rows = await fetchVuduLibrary(auth, {
+      onProgress?.(`Fetching ${spec.type} from Vudu API…`, media.length);
+      const fetchOpts = {
         superType: spec.superType,
-        listType: "rentedOrOwned",
-        claimedAppId: "html5app",
-      }).catch(async (err) => {
+        listType: "rentedOrOwned" as const,
+        claimedAppId: "html5app" as const,
+        onPage: (info: { superType: string; page: number; batchSize: number; total: number }) => {
+          onProgress?.(
+            `Fetching ${info.superType}: page ${info.page} (+${info.batchSize}, ${info.total} so far)`,
+            media.length + info.total
+          );
+        },
+      };
+      let rows = await fetchVuduLibrary(auth, fetchOpts).catch(async (err) => {
         log.warn(`html5app failed for ${spec.superType}, retrying myvudu`, err);
-        return fetchVuduLibrary(auth, {
-          superType: spec.superType,
-          listType: "rentedOrOwned",
-          claimedAppId: "myvudu",
-        });
+        onProgress?.(`Retrying ${spec.type} with alternate API…`, media.length);
+        return fetchVuduLibrary(auth, { ...fetchOpts, claimedAppId: "myvudu" });
       });
 
       for (const row of rows) {
@@ -267,10 +274,12 @@ export class FandangoProvider implements Provider {
               : undefined,
         });
       }
+      onProgress?.(`Found ${rows.length} ${spec.type} titles (${media.length} total)`, media.length);
       log.info(`Fandango API ${spec.type}: ${rows.length} titles`);
     }
 
     await this.expandBundles(media, onProgress);
+    onProgress?.(`Saving ${media.length} titles…`, media.length);
     log.info(`Scraped ${media.length} total items via Vudu API`);
     return media;
   }
@@ -278,13 +287,13 @@ export class FandangoProvider implements Provider {
   /** Look up individual titles inside bundle/collection purchases. */
   private async expandBundles(
     media: MediaItem[],
-    onProgress?: (message: string) => void
+    onProgress?: (message: string, itemsFound?: number) => void
   ): Promise<void> {
     const bundles = media.filter((m) => m.meta?.isCollection || m.meta?.contentKind === "bundle");
     if (bundles.length === 0) return;
 
     log.info(`Expanding ${bundles.length} bundle/collection items…`);
-    onProgress?.(`Expanding ${bundles.length} collections…`);
+    onProgress?.(`Expanding ${bundles.length} collections…`, media.length);
     let done = 0;
     const concurrency = 5;
     for (let i = 0; i < bundles.length; i += concurrency) {
@@ -311,7 +320,7 @@ export class FandangoProvider implements Provider {
           } finally {
             done++;
             if (done % 10 === 0 || done === bundles.length) {
-              onProgress?.(`Expanded ${done}/${bundles.length} collections…`);
+              onProgress?.(`Expanded ${done}/${bundles.length} collections…`, media.length);
             }
           }
         })

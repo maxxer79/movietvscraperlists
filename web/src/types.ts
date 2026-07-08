@@ -51,7 +51,19 @@ export interface ScrapeJobStatus {
   status: "running" | "done" | "error";
   message: string;
   count: number | null;
+  itemsFound?: number | null;
+  logLines?: string[];
   error?: string;
   sessionExpired?: boolean;
   snapshot?: { count: number };
+  startedAt?: string;
+  finishedAt?: string | null;
+}
+
+export interface SyncProgress {
+  message: string;
+  itemsFound?: number | null;
+  logLines: string[];
+  startedAt?: string;
+  showLog: boolean;
 }

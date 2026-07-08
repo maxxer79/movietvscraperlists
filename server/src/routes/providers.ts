@@ -130,6 +130,8 @@ providersRouter.get("/:id/scrape/status", (req, res) => {
     status: job.status,
     message: job.message,
     count: job.count ?? null,
+    itemsFound: job.itemsFound ?? null,
+    logLines: job.logLines ?? [],
     snapshot: job.status === "done" ? job.snapshot : undefined,
     error: job.error,
     sessionExpired: job.sessionExpired ?? false,

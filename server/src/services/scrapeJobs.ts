@@ -8,6 +8,7 @@ import { newContext } from "./browser.js";
 import { saveLibrary, type LibrarySnapshot } from "./libraryStore.js";
 import { clearSession, loadSession } from "./sessionStore.js";
 import { paths } from "./paths.js";
+import { appendJobLog } from "./syncLog.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("scrape-jobs");
@@ -20,11 +21,14 @@ export interface ScrapeJob {
   status: "running" | "done" | "error";
   message: string;
   count?: number;
+  /** Titles discovered so far during an in-progress sync. */
+  itemsFound?: number;
   startedAt: string;
   finishedAt?: string;
   snapshot?: LibrarySnapshot;
   error?: string;
   sessionExpired?: boolean;
+  logLines?: string[];
 }
 
 const jobs = new Map<string, ScrapeJob>();
@@ -172,9 +176,12 @@ export function startScrapeJob(providerId: string): ScrapeJob {
     providerId,
     status: "running",
     message: "Starting library sync…",
+    itemsFound: 0,
     startedAt: new Date().toISOString(),
+    logLines: [],
   };
   rememberJob(job);
+  appendJobLog(job, "Sync job started");
   activeByProvider.set(providerId, job.id);
 
   setImmediate(() => {
@@ -191,17 +198,26 @@ function updateJob(job: ScrapeJob, patch: Partial<ScrapeJob>): void {
   rememberJob(job);
 }
 
+function jobProgress(
+  job: ScrapeJob,
+  message: string,
+  extra?: Partial<Pick<ScrapeJob, "itemsFound">>
+): void {
+  appendJobLog(job, message);
+  updateJob(job, { message, ...extra });
+}
+
 async function runScrapeJob(
   job: ScrapeJob,
   provider: NonNullable<ReturnType<typeof getProvider>>,
   storageState: string
 ): Promise<void> {
   try {
-    updateJob(job, {
-      message: "Fetching your library — large collections may take a few minutes…",
-    });
+    jobProgress(job, "Fetching your library — large collections may take several minutes…");
 
-    const onProgress = (message: string) => updateJob(job, { message });
+    const onProgress = (message: string, itemsFound?: number) => {
+      jobProgress(job, message, itemsFound !== undefined ? { itemsFound } : undefined);
+    };
 
     // Fandango: prefer direct Vudu API using saved session (no Chromium).
     if (provider.id === "fandango") {
@@ -211,6 +227,7 @@ async function runScrapeJob(
       );
       if (items) {
         const snapshot = saveLibrary(provider.id, items);
+        jobProgress(job, `Finished — saved ${snapshot.count} titles`, { itemsFound: snapshot.count });
         updateJob(job, {
           status: "done",
           count: snapshot.count,
@@ -221,14 +238,15 @@ async function runScrapeJob(
         log.info(`${provider.id} scrape job ${job.id} finished (light API): ${snapshot.count} items`);
         return;
       }
+      jobProgress(job, "No API credentials in saved session — opening browser (slower)…");
       log.warn(`${provider.id}: no API credentials in saved session — falling back to browser`);
-      updateJob(job, { message: "Opening browser to read session…" });
     }
 
     const context = await newContext(storageState);
     try {
       const items = await provider.scrapeLibrary(context);
       const snapshot = saveLibrary(provider.id, items);
+      jobProgress(job, `Finished — saved ${snapshot.count} titles`, { itemsFound: snapshot.count });
       updateJob(job, {
         status: "done",
         count: snapshot.count,
@@ -253,6 +271,7 @@ async function runScrapeJob(
       });
     } else {
       const message = (err as Error).message;
+      appendJobLog(job, `ERROR: ${message}`);
       updateJob(job, {
         status: "error",
         error: message,
