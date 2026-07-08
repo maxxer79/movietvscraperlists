@@ -20,6 +20,7 @@ import {
 import { createLogger } from "../logger.js";
 import {
   extractVuduAuth,
+  extractVuduAuthFromStorageState,
   fetchBundleContents,
   fetchVuduLibrary,
   isBundleItem,
@@ -194,8 +195,8 @@ export class FandangoProvider implements Provider {
 
       const auth = await extractVuduAuth(page);
       if (auth) {
-        log.info(`Using Vudu API (userId ${auth.userId.slice(0, 6)}…)`);
-        return this.scrapeViaApi(context, auth);
+        log.info(`Using Vudu API via browser (userId ${auth.userId.slice(0, 6)}…)`);
+        return this.scrapeViaApi(auth);
       }
 
       log.warn("No Vudu session in localStorage — falling back to DOM scroll scrape");
@@ -205,12 +206,26 @@ export class FandangoProvider implements Provider {
     }
   }
 
+  /**
+   * Lightweight sync: read saved session credentials and call the Vudu API directly.
+   * Avoids launching Chromium — critical for large libraries in Docker.
+   */
+  async scrapeFromStorageState(
+    storageStateJson: string,
+    onProgress?: (message: string) => void
+  ): Promise<MediaItem[] | null> {
+    const auth = extractVuduAuthFromStorageState(storageStateJson);
+    if (!auth) return null;
+    log.info(`Light Vudu API sync (userId ${auth.userId.slice(0, 6)}…)`);
+    onProgress?.("Fetching library via Vudu API…");
+    return this.scrapeViaApi(auth, onProgress);
+  }
+
   /** Paginated api.vudu.com contentSearch — reliable for 1000+ titles. listType rentedOrOwned excludes wishlist. */
   private async scrapeViaApi(
-    context: BrowserContext,
-    auth: { sessionKey: string; userId: string }
+    auth: { sessionKey: string; userId: string },
+    onProgress?: (message: string) => void
   ): Promise<MediaItem[]> {
-    const request = context.request;
     const media: MediaItem[] = [];
     const seen = new Set<string>();
 
@@ -218,13 +233,14 @@ export class FandangoProvider implements Provider {
       { superType: "movies" as const, type: "movie" as const },
       { superType: "tv" as const, type: "tv" as const },
     ]) {
-      let rows = await fetchVuduLibrary(request, auth, {
+      onProgress?.(`Fetching ${spec.type}…`);
+      let rows = await fetchVuduLibrary(auth, {
         superType: spec.superType,
         listType: "rentedOrOwned",
         claimedAppId: "html5app",
       }).catch(async (err) => {
         log.warn(`html5app failed for ${spec.superType}, retrying myvudu`, err);
-        return fetchVuduLibrary(request, auth, {
+        return fetchVuduLibrary(auth, {
           superType: spec.superType,
           listType: "rentedOrOwned",
           claimedAppId: "myvudu",
@@ -254,44 +270,52 @@ export class FandangoProvider implements Provider {
       log.info(`Fandango API ${spec.type}: ${rows.length} titles`);
     }
 
-    await this.expandBundles(request, media);
+    await this.expandBundles(media, onProgress);
     log.info(`Scraped ${media.length} total items via Vudu API`);
     return media;
   }
 
   /** Look up individual titles inside bundle/collection purchases. */
   private async expandBundles(
-    request: BrowserContext["request"],
-    media: MediaItem[]
+    media: MediaItem[],
+    onProgress?: (message: string) => void
   ): Promise<void> {
     const bundles = media.filter((m) => m.meta?.isCollection || m.meta?.contentKind === "bundle");
     if (bundles.length === 0) return;
 
     log.info(`Expanding ${bundles.length} bundle/collection items…`);
+    onProgress?.(`Expanding ${bundles.length} collections…`);
     let done = 0;
-    for (const bundle of bundles) {
-      try {
-        const children = await fetchBundleContents(request, bundle.id);
-        if (children.length === 0) continue;
-        bundle.meta = {
-          ...bundle.meta,
-          isCollection: true,
-          contentKind: "bundle",
-          collectionCount: children.length,
-          collectionItems: children.map((c) => ({
-            id: c.contentId,
-            title: c.title,
-            year: releaseYear(c.releaseTime),
-            type: c.contentKind === "season" || c.contentKind === "series" ? "tv" : "movie",
-          })),
-        };
-      } catch (err) {
-        log.warn(`Could not expand bundle "${bundle.title}" (${bundle.id})`, err);
-      }
-      done++;
-      if (done % 10 === 0) {
-        log.info(`Expanded ${done}/${bundles.length} bundles…`);
-      }
+    const concurrency = 5;
+    for (let i = 0; i < bundles.length; i += concurrency) {
+      const chunk = bundles.slice(i, i + concurrency);
+      await Promise.all(
+        chunk.map(async (bundle) => {
+          try {
+            const children = await fetchBundleContents(bundle.id);
+            if (children.length === 0) return;
+            bundle.meta = {
+              ...bundle.meta,
+              isCollection: true,
+              contentKind: "bundle",
+              collectionCount: children.length,
+              collectionItems: children.map((c) => ({
+                id: c.contentId,
+                title: c.title,
+                year: releaseYear(c.releaseTime),
+                type: c.contentKind === "season" || c.contentKind === "series" ? "tv" : "movie",
+              })),
+            };
+          } catch (err) {
+            log.warn(`Could not expand bundle "${bundle.title}" (${bundle.id})`, err);
+          } finally {
+            done++;
+            if (done % 10 === 0 || done === bundles.length) {
+              onProgress?.(`Expanded ${done}/${bundles.length} collections…`);
+            }
+          }
+        })
+      );
     }
     log.info(`Finished expanding ${done} bundles`);
   }

@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "no
 import { join } from "node:path";
 import { getProvider } from "../scrapers/registry.js";
 import { SessionExpiredError } from "../scrapers/types.js";
+import { FandangoProvider } from "../scrapers/fandango.js";
 import { newContext } from "./browser.js";
 import { saveLibrary, type LibrarySnapshot } from "./libraryStore.js";
 import { clearSession, loadSession } from "./sessionStore.js";
@@ -176,8 +177,10 @@ export function startScrapeJob(providerId: string): ScrapeJob {
   rememberJob(job);
   activeByProvider.set(providerId, job.id);
 
-  void runScrapeJob(job, provider, state).catch((err) => {
-    log.error(`Unhandled scrape job failure for ${providerId}`, err);
+  setImmediate(() => {
+    void runScrapeJob(job, provider, state).catch((err) => {
+      log.error(`Unhandled scrape job failure for ${providerId}`, err);
+    });
   });
 
   return job;
@@ -193,21 +196,50 @@ async function runScrapeJob(
   provider: NonNullable<ReturnType<typeof getProvider>>,
   storageState: string
 ): Promise<void> {
-  const context = await newContext(storageState);
   try {
     updateJob(job, {
       message: "Fetching your library — large collections may take a few minutes…",
     });
-    const items = await provider.scrapeLibrary(context);
-    const snapshot = saveLibrary(provider.id, items);
-    updateJob(job, {
-      status: "done",
-      count: snapshot.count,
-      snapshot,
-      message: `Synced ${snapshot.count} titles`,
-      finishedAt: new Date().toISOString(),
-    });
-    log.info(`${provider.id} scrape job ${job.id} finished: ${snapshot.count} items`);
+
+    const onProgress = (message: string) => updateJob(job, { message });
+
+    // Fandango: prefer direct Vudu API using saved session (no Chromium).
+    if (provider.id === "fandango") {
+      const items = await (provider as FandangoProvider).scrapeFromStorageState(
+        storageState,
+        onProgress
+      );
+      if (items) {
+        const snapshot = saveLibrary(provider.id, items);
+        updateJob(job, {
+          status: "done",
+          count: snapshot.count,
+          snapshot,
+          message: `Synced ${snapshot.count} titles`,
+          finishedAt: new Date().toISOString(),
+        });
+        log.info(`${provider.id} scrape job ${job.id} finished (light API): ${snapshot.count} items`);
+        return;
+      }
+      log.warn(`${provider.id}: no API credentials in saved session — falling back to browser`);
+      updateJob(job, { message: "Opening browser to read session…" });
+    }
+
+    const context = await newContext(storageState);
+    try {
+      const items = await provider.scrapeLibrary(context);
+      const snapshot = saveLibrary(provider.id, items);
+      updateJob(job, {
+        status: "done",
+        count: snapshot.count,
+        snapshot,
+        message: `Synced ${snapshot.count} titles`,
+        finishedAt: new Date().toISOString(),
+      });
+      log.info(`${provider.id} scrape job ${job.id} finished: ${snapshot.count} items`);
+    } finally {
+      await context.close().catch(() => {});
+    }
   } catch (err) {
     const finishedAt = new Date().toISOString();
     if (err instanceof SessionExpiredError) {
@@ -231,6 +263,5 @@ async function runScrapeJob(
     log.error(`${provider.id} scrape job ${job.id} failed`, err);
   } finally {
     activeByProvider.delete(provider.id);
-    await context.close().catch(() => {});
   }
 }

@@ -1,4 +1,4 @@
-import type { APIRequestContext, Page } from "playwright";
+import type { Page } from "playwright";
 import { createLogger } from "../logger.js";
 import { SessionExpiredError } from "./types.js";
 
@@ -26,6 +26,50 @@ export function parseVuduJson(text: string): Record<string, unknown> {
   return JSON.parse(inner) as Record<string, unknown>;
 }
 
+
+function considerAuthEntry(
+  key: string,
+  val: string,
+  out: { sessionKey?: string; userId?: string }
+): void {
+  if (/weakSessionKey$/i.test(key) && val) out.sessionKey = val;
+  if (/userID$/i.test(key) && val) out.userId = val;
+  if (/userId$/i.test(key) && val) out.userId = val;
+
+  if ((!out.sessionKey || !out.userId) && val.trim().startsWith("{")) {
+    try {
+      const obj = JSON.parse(val) as Record<string, unknown>;
+      for (const [k, v] of Object.entries(obj)) {
+        if (typeof v === "string") considerAuthEntry(k, v, out);
+      }
+    } catch {
+      /* not JSON */
+    }
+  }
+}
+
+function finalizeAuth(out: { sessionKey?: string; userId?: string }): VuduAuth | null {
+  if (!out.sessionKey || !out.userId) return null;
+  return { sessionKey: out.sessionKey, userId: out.userId };
+}
+
+/** Read weakSessionKey + userId from a saved Playwright storageState JSON (no browser). */
+export function extractVuduAuthFromStorageState(storageStateJson: string): VuduAuth | null {
+  try {
+    const state = JSON.parse(storageStateJson) as {
+      origins?: Array<{ localStorage?: Array<{ name: string; value: string }> }>;
+    };
+    const out: { sessionKey?: string; userId?: string } = {};
+    for (const origin of state.origins ?? []) {
+      for (const entry of origin.localStorage ?? []) {
+        considerAuthEntry(entry.name, entry.value, out);
+      }
+    }
+    return finalizeAuth(out);
+  } catch {
+    return null;
+  }
+}
 
 /** Read weakSessionKey + userId from the logged-in web app's localStorage. */
 export async function extractVuduAuth(page: Page): Promise<VuduAuth | null> {
@@ -59,8 +103,7 @@ export async function extractVuduAuth(page: Page): Promise<VuduAuth | null> {
     return { sessionKey, userId };
   });
 
-  if (!auth.sessionKey || !auth.userId) return null;
-  return { sessionKey: auth.sessionKey, userId: auth.userId };
+  return finalizeAuth(auth);
 }
 
 export interface VuduContentItem {
@@ -114,14 +157,13 @@ function parseContentRow(row: Record<string, unknown>): VuduContentItem | null {
 }
 
 async function vuduGet(
-  request: APIRequestContext,
   params: URLSearchParams,
   context: string
 ): Promise<Record<string, unknown>> {
   const url = `${API_BASE}?${params.toString()}`;
-  const res = await request.get(url, { timeout: 60_000 });
-  if (!res.ok()) {
-    throw new Error(`Vudu API HTTP ${res.status()} for ${context}`);
+  const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+  if (!res.ok) {
+    throw new Error(`Vudu API HTTP ${res.status} for ${context}`);
   }
   const data = parseVuduJson(await res.text());
   assertVuduOk(data, context);
@@ -130,7 +172,6 @@ async function vuduGet(
 
 /** Paginate the undocumented contentSearch API (100 items/page, moreBelow flag). */
 export async function fetchVuduLibrary(
-  request: APIRequestContext,
   auth: VuduAuth,
   opts: FetchLibraryOpts
 ): Promise<VuduContentItem[]> {
@@ -163,11 +204,7 @@ export async function fetchVuduLibrary(
       params.append("type", "series");
     }
 
-    const data = await vuduGet(
-      request,
-      params,
-      `${opts.superType} offset ${offset}`
-    );
+    const data = await vuduGet(params, `${opts.superType} offset ${offset}`);
     const batch = (data.content as Record<string, unknown>[] | undefined) ?? [];
     for (const row of batch) {
       const item = parseContentRow(row);
@@ -187,10 +224,7 @@ export async function fetchVuduLibrary(
 }
 
 /** Individual movies/shows inside a bundle/collection (containerId lookup). */
-export async function fetchBundleContents(
-  request: APIRequestContext,
-  containerId: string
-): Promise<VuduContentItem[]> {
+export async function fetchBundleContents(containerId: string): Promise<VuduContentItem[]> {
   const out: VuduContentItem[] = [];
   let offset = 0;
   let pages = 0;
@@ -204,7 +238,7 @@ export async function fetchBundleContents(
     params.set("count", "100");
     params.set("offset", String(offset));
 
-    const data = await vuduGet(request, params, `bundle ${containerId} offset ${offset}`);
+    const data = await vuduGet(params, `bundle ${containerId} offset ${offset}`);
     const batch = (data.content as Record<string, unknown>[] | undefined) ?? [];
     for (const row of batch) {
       const item = parseContentRow(row);

@@ -78,7 +78,18 @@ export function App() {
 
       const deadline = Date.now() + 15 * 60 * 1000;
       while (Date.now() < deadline) {
-        const status = await api.scrapeStatus(id, start.jobId);
+        let status;
+        try {
+          status = await api.scrapeStatus(id, start.jobId);
+        } catch (e) {
+          if ((e as Error).message === "Failed to fetch") {
+            toast(`${name}: connection interrupted — retrying…`);
+            await new Promise((r) => setTimeout(r, 3000));
+            continue;
+          }
+          throw e;
+        }
+
         if (status.status === "running") {
           await new Promise((r) => setTimeout(r, 2000));
           continue;
