@@ -20,7 +20,9 @@ import {
 import { createLogger } from "../logger.js";
 import {
   extractVuduAuth,
+  fetchBundleContents,
   fetchVuduLibrary,
+  isBundleItem,
   releaseYear,
   vuduDetailUrl,
 } from "./vuduApi.js";
@@ -233,6 +235,7 @@ export class FandangoProvider implements Provider {
         const key = `${spec.type}:${row.contentId}`;
         if (seen.has(key)) continue;
         seen.add(key);
+        const isBundle = isBundleItem(row);
         media.push({
           id: row.contentId,
           title: row.title,
@@ -241,13 +244,56 @@ export class FandangoProvider implements Provider {
           quality: row.quality,
           posterUrl: row.posterUrl,
           url: vuduDetailUrl(row.title, row.contentId),
+          meta: isBundle
+            ? { contentKind: "bundle", isCollection: true }
+            : row.contentKind
+              ? { contentKind: row.contentKind }
+              : undefined,
         });
       }
       log.info(`Fandango API ${spec.type}: ${rows.length} titles`);
     }
 
+    await this.expandBundles(request, media);
     log.info(`Scraped ${media.length} total items via Vudu API`);
     return media;
+  }
+
+  /** Look up individual titles inside bundle/collection purchases. */
+  private async expandBundles(
+    request: BrowserContext["request"],
+    media: MediaItem[]
+  ): Promise<void> {
+    const bundles = media.filter((m) => m.meta?.isCollection || m.meta?.contentKind === "bundle");
+    if (bundles.length === 0) return;
+
+    log.info(`Expanding ${bundles.length} bundle/collection items…`);
+    let done = 0;
+    for (const bundle of bundles) {
+      try {
+        const children = await fetchBundleContents(request, bundle.id);
+        if (children.length === 0) continue;
+        bundle.meta = {
+          ...bundle.meta,
+          isCollection: true,
+          contentKind: "bundle",
+          collectionCount: children.length,
+          collectionItems: children.map((c) => ({
+            id: c.contentId,
+            title: c.title,
+            year: releaseYear(c.releaseTime),
+            type: c.contentKind === "season" || c.contentKind === "series" ? "tv" : "movie",
+          })),
+        };
+      } catch (err) {
+        log.warn(`Could not expand bundle "${bundle.title}" (${bundle.id})`, err);
+      }
+      done++;
+      if (done % 10 === 0) {
+        log.info(`Expanded ${done}/${bundles.length} bundles…`);
+      }
+    }
+    log.info(`Finished expanding ${done} bundles`);
   }
 
   /** DOM fallback when API auth isn't available (virtualized grid — may miss titles). */

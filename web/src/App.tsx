@@ -70,9 +70,29 @@ export function App() {
   async function scrape(id: string, name: string) {
     setBusyId(id);
     try {
-      const res = await api.scrape(id);
-      toast(`${name}: synced ${res.snapshot.count} titles`);
-      await refresh();
+      const start = await api.scrape(id);
+      toast(`${name}: syncing library — this may take a few minutes…`);
+
+      const deadline = Date.now() + 15 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const status = await api.scrapeStatus(id, start.jobId);
+        if (status.status === "running") continue;
+
+        if (status.status === "done") {
+          toast(`${name}: synced ${status.count ?? status.snapshot?.count ?? 0} titles`);
+          await refresh();
+          return;
+        }
+
+        if (status.sessionExpired) {
+          toast(`${name}: session expired — please reconnect`);
+          await refresh();
+          return;
+        }
+        throw new Error(status.error || status.message || "Sync failed");
+      }
+      throw new Error("Sync timed out after 15 minutes — try again");
     } catch (e) {
       const err = e as Error & { body?: { sessionExpired?: boolean } };
       if (err.body?.sessionExpired) {

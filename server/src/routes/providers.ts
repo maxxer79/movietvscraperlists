@@ -1,11 +1,14 @@
 import { Router } from "express";
 import { z } from "zod";
 import { enabledProviders, getProvider } from "../scrapers/registry.js";
-import { hasSession, clearSession, loadSession } from "../services/sessionStore.js";
-import { loadLibrary, saveLibrary } from "../services/libraryStore.js";
-import { newContext } from "../services/browser.js";
+import { hasSession, clearSession } from "../services/sessionStore.js";
+import { loadLibrary } from "../services/libraryStore.js";
 import { startLogin, submitInput, cancelLogin } from "../scrapers/loginController.js";
-import { SessionExpiredError } from "../scrapers/types.js";
+import {
+  getActiveScrapeJob,
+  getScrapeJob,
+  startScrapeJob,
+} from "../services/scrapeJobs.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("api");
@@ -87,34 +90,53 @@ providersRouter.post("/:id/disconnect", (req, res) => {
   res.json({ ok: true });
 });
 
-// Trigger a scrape using the saved session.
+// Trigger a scrape using the saved session (runs in background for large libraries).
 providersRouter.post("/:id/scrape", async (req, res) => {
   const provider = getProvider(req.params.id);
   if (!provider) return res.status(404).json({ error: "Unknown provider" });
   if (!provider.implemented)
     return res.status(400).json({ error: `${provider.name} is not implemented yet.` });
 
-  const state = loadSession(provider.id);
-  if (!state)
-    return res
-      .status(401)
-      .json({ error: "Not connected. Please log in to this provider first." });
-
-  const context = await newContext(state);
   try {
-    const items = await provider.scrapeLibrary(context);
-    const snapshot = saveLibrary(provider.id, items);
-    res.json({ ok: true, snapshot });
+    const job = startScrapeJob(provider.id);
+    res.status(202).json({
+      ok: true,
+      jobId: job.id,
+      status: job.status,
+      message: job.message,
+    });
   } catch (err) {
-    if (err instanceof SessionExpiredError) {
-      clearSession(provider.id);
-      return res.status(401).json({ error: err.message, sessionExpired: true });
+    const message = (err as Error).message;
+    if (message.includes("Not connected")) {
+      return res.status(401).json({ error: message });
     }
-    log.error(`scrape failed for ${provider.id}`, err);
-    res.status(500).json({ error: (err as Error).message });
-  } finally {
-    await context.close().catch(() => {});
+    log.error(`scrape start failed for ${provider.id}`, err);
+    res.status(500).json({ error: message });
   }
+});
+
+// Poll scrape progress (avoids browser/proxy timeouts on large libraries).
+providersRouter.get("/:id/scrape/status", (req, res) => {
+  const provider = getProvider(req.params.id);
+  if (!provider) return res.status(404).json({ error: "Unknown provider" });
+
+  const jobId = req.query.jobId as string | undefined;
+  const job = jobId ? getScrapeJob(jobId) : getActiveScrapeJob(provider.id);
+  if (!job || job.providerId !== provider.id) {
+    return res.status(404).json({ error: "No scrape job found." });
+  }
+
+  res.json({
+    jobId: job.id,
+    status: job.status,
+    message: job.message,
+    count: job.count ?? null,
+    snapshot: job.status === "done" ? job.snapshot : undefined,
+    error: job.error,
+    sessionExpired: job.sessionExpired ?? false,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt ?? null,
+  });
 });
 
 // Get the stored library for a provider.

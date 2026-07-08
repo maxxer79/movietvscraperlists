@@ -2,6 +2,7 @@ import type {
   CombinedItem,
   LoginStep,
   ProviderStatus,
+  ScrapeJobStatus,
   VersionInfo,
 } from "./types";
 
@@ -66,9 +67,13 @@ export const api = {
   disconnect: (id: string) =>
     req<{ ok: boolean }>(`/api/providers/${id}/disconnect`, { method: "POST" }),
   scrape: (id: string) =>
-    req<{ ok: boolean; snapshot: { count: number } }>(
+    req<{ ok: boolean; jobId: string; status: string; message: string }>(
       `/api/providers/${id}/scrape`,
       { method: "POST" }
+    ),
+  scrapeStatus: (id: string, jobId: string) =>
+    req<ScrapeJobStatus>(
+      `/api/providers/${id}/scrape/status?jobId=${encodeURIComponent(jobId)}`
     ),
   library: () =>
     req<{ count: number; items: CombinedItem[] }>("/api/library"),

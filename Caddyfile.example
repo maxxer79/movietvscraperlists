@@ -11,8 +11,14 @@
 movies.example.com {
 	encode zstd gzip
 
-	# If Caddy and the app share a Docker network, use the container name:
-	reverse_proxy movietvscraperlists:8088
+	# Large library syncs can run for several minutes in the background.
+	reverse_proxy movietvscraperlists:8088 {
+		flush_interval -1
+		transport http {
+			read_timeout 15m
+			write_timeout 15m
+		}
+	}
 
 	# If instead you published the port on the host, use that address:
 	# reverse_proxy 127.0.0.1:8088

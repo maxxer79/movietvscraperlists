@@ -1,5 +1,6 @@
 import type { APIRequestContext, Page } from "playwright";
 import { createLogger } from "../logger.js";
+import { SessionExpiredError } from "./types.js";
 
 const log = createLogger("vudu-api");
 const API_BASE = "https://api.vudu.com/api2/";
@@ -25,21 +26,39 @@ export function parseVuduJson(text: string): Record<string, unknown> {
   return JSON.parse(inner) as Record<string, unknown>;
 }
 
+
 /** Read weakSessionKey + userId from the logged-in web app's localStorage. */
 export async function extractVuduAuth(page: Page): Promise<VuduAuth | null> {
   const auth = await page.evaluate(() => {
     let sessionKey: string | undefined;
     let userId: string | undefined;
+
+    const consider = (key: string, val: string) => {
+      if (/weakSessionKey$/i.test(key) && val) sessionKey = val;
+      if (/userID$/i.test(key) && val) userId = val;
+      if (/userId$/i.test(key) && val) userId = val;
+    };
+
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
       if (!key) continue;
       const val = localStorage.getItem(key) || "";
-      if (/weakSessionKey$/i.test(key) && val) sessionKey = val;
-      if (/userID$/i.test(key) && val) userId = val;
-      if (/userId$/i.test(key) && val) userId = val;
+      consider(key, val);
+
+      if ((!sessionKey || !userId) && val.trim().startsWith("{")) {
+        try {
+          const obj = JSON.parse(val) as Record<string, unknown>;
+          for (const [k, v] of Object.entries(obj)) {
+            if (typeof v === "string") consider(k, v);
+          }
+        } catch {
+          /* not JSON */
+        }
+      }
     }
     return { sessionKey, userId };
   });
+
   if (!auth.sessionKey || !auth.userId) return null;
   return { sessionKey: auth.sessionKey, userId: auth.userId };
 }
@@ -51,12 +70,62 @@ export interface VuduContentItem {
   quality?: string;
   releaseTime?: string;
   superType?: string;
+  /** program | bundle | season | series */
+  contentKind?: string;
+  isContainer?: boolean;
 }
 
 interface FetchLibraryOpts {
   superType: "movies" | "tv";
   listType?: string;
   claimedAppId?: string;
+}
+
+function assertVuduOk(data: Record<string, unknown>, context: string): void {
+  const type = vuduStr(data, "_type");
+  if (type !== "error") return;
+
+  const code = vuduStr(data, "code") || "unknown";
+  const text = vuduStr(data, "text") || code;
+  if (code === "authenticationExpired" || code === "accessDenied") {
+    throw new SessionExpiredError(
+      "Fandango session expired. Please disconnect and log in again."
+    );
+  }
+  throw new Error(`Vudu API error (${context}): ${text}`);
+}
+
+function parseContentRow(row: Record<string, unknown>): VuduContentItem | null {
+  const contentId = vuduStr(row, "contentId");
+  const title = vuduStr(row, "title");
+  if (!contentId || !title) return null;
+  return {
+    contentId,
+    title,
+    posterUrl: normalizePoster(vuduStr(row, "posterUrl")),
+    quality: normalizeQuality(
+      vuduStr(row, "bestDashVideoQuality") || vuduStr(row, "bestVideoQuality")
+    ),
+    releaseTime: vuduStr(row, "releaseTime"),
+    superType: vuduStr(row, "superType"),
+    contentKind: vuduStr(row, "type"),
+    isContainer: vuduStr(row, "isContainer") === "true",
+  };
+}
+
+async function vuduGet(
+  request: APIRequestContext,
+  params: URLSearchParams,
+  context: string
+): Promise<Record<string, unknown>> {
+  const url = `${API_BASE}?${params.toString()}`;
+  const res = await request.get(url, { timeout: 60_000 });
+  if (!res.ok()) {
+    throw new Error(`Vudu API HTTP ${res.status()} for ${context}`);
+  }
+  const data = parseVuduJson(await res.text());
+  assertVuduOk(data, context);
+  return data;
 }
 
 /** Paginate the undocumented contentSearch API (100 items/page, moreBelow flag). */
@@ -72,20 +141,20 @@ export async function fetchVuduLibrary(
   let pages = 0;
 
   while (pages < 200) {
-  const params = new URLSearchParams();
-  params.set("claimedAppId", claimedAppId);
-  params.set("format", "application/json");
-  params.set("_type", "contentSearch");
-  params.set("count", "100");
-  params.set("dimensionality", "any");
-  params.append("followup", "ratingsSummaries");
-  params.append("followup", "totalCount");
-  params.set("listType", listType);
-  params.set("sessionKey", auth.sessionKey);
-  params.set("sortBy", "title");
-  params.set("superType", opts.superType);
-  params.set("userId", auth.userId);
-  params.set("offset", String(offset));
+    const params = new URLSearchParams();
+    params.set("claimedAppId", claimedAppId);
+    params.set("format", "application/json");
+    params.set("_type", "contentSearch");
+    params.set("count", "100");
+    params.set("dimensionality", "any");
+    params.append("followup", "ratingsSummaries");
+    params.append("followup", "totalCount");
+    params.set("listType", listType);
+    params.set("sessionKey", auth.sessionKey);
+    params.set("sortBy", "title");
+    params.set("superType", opts.superType);
+    params.set("userId", auth.userId);
+    params.set("offset", String(offset));
     if (opts.superType === "movies") {
       params.append("type", "program");
       params.append("type", "bundle");
@@ -94,28 +163,15 @@ export async function fetchVuduLibrary(
       params.append("type", "series");
     }
 
-    const url = `${API_BASE}?${params.toString()}`;
-    const res = await request.get(url, { timeout: 60_000 });
-    if (!res.ok()) {
-      throw new Error(`Vudu API HTTP ${res.status()} for ${opts.superType} offset ${offset}`);
-    }
-
-    const data = parseVuduJson(await res.text());
+    const data = await vuduGet(
+      request,
+      params,
+      `${opts.superType} offset ${offset}`
+    );
     const batch = (data.content as Record<string, unknown>[] | undefined) ?? [];
     for (const row of batch) {
-      const contentId = vuduStr(row, "contentId");
-      const title = vuduStr(row, "title");
-      if (!contentId || !title) continue;
-      out.push({
-        contentId,
-        title,
-        posterUrl: normalizePoster(vuduStr(row, "posterUrl")),
-        quality: normalizeQuality(
-          vuduStr(row, "bestDashVideoQuality") || vuduStr(row, "bestVideoQuality")
-        ),
-        releaseTime: vuduStr(row, "releaseTime"),
-        superType: vuduStr(row, "superType"),
-      });
+      const item = parseContentRow(row);
+      if (item) out.push(item);
     }
 
     const moreBelow = vuduStr(data, "moreBelow");
@@ -123,6 +179,40 @@ export async function fetchVuduLibrary(
     log.info(
       `${opts.superType} page ${pages}: +${batch.length} (total ${out.length}), moreBelow=${moreBelow}`
     );
+    if (moreBelow !== "true") break;
+    offset += 100;
+  }
+
+  return out;
+}
+
+/** Individual movies/shows inside a bundle/collection (containerId lookup). */
+export async function fetchBundleContents(
+  request: APIRequestContext,
+  containerId: string
+): Promise<VuduContentItem[]> {
+  const out: VuduContentItem[] = [];
+  let offset = 0;
+  let pages = 0;
+
+  while (pages < 20) {
+    const params = new URLSearchParams();
+    params.set("claimedAppId", "html5app");
+    params.set("format", "application/json");
+    params.set("_type", "contentSearch");
+    params.set("containerId", containerId);
+    params.set("count", "100");
+    params.set("offset", String(offset));
+
+    const data = await vuduGet(request, params, `bundle ${containerId} offset ${offset}`);
+    const batch = (data.content as Record<string, unknown>[] | undefined) ?? [];
+    for (const row of batch) {
+      const item = parseContentRow(row);
+      if (item) out.push(item);
+    }
+
+    const moreBelow = vuduStr(data, "moreBelow");
+    pages++;
     if (moreBelow !== "true") break;
     offset += 100;
   }
@@ -155,4 +245,12 @@ export function releaseYear(releaseTime: string | undefined): number | undefined
   if (!releaseTime) return undefined;
   const m = releaseTime.match(/\b(19|20)\d{2}\b/);
   return m ? parseInt(m[0], 10) : undefined;
+}
+
+export function isBundleItem(item: VuduContentItem): boolean {
+  return (
+    item.contentKind === "bundle" ||
+    item.isContainer === true ||
+    /\(\s*Bundle\s*\)/i.test(item.title)
+  );
 }

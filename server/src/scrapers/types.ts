@@ -12,8 +12,8 @@ export interface MediaItem {
   posterUrl?: string;
   /** Deep link to the item on the provider, if discoverable. */
   url?: string;
-  /** Free-form extras (season count, studio, etc.). */
-  meta?: Record<string, string | number | boolean | null>;
+  /** Free-form extras (season count, studio, collection contents, etc.). */
+  meta?: Record<string, string | number | boolean | null | unknown>;
 }
 
 /** Result of a single step in the interactive login flow. */

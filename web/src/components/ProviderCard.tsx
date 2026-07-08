@@ -52,7 +52,13 @@ export function ProviderCard({
               onClick={onScrape}
               disabled={busy}
             >
-              {busy ? <span className="spinner" /> : "Sync library"}
+              {busy ? (
+                <>
+                  <span className="spinner" /> Syncing…
+                </>
+              ) : (
+                "Sync library"
+              )}
             </button>
             <button className="btn btn-danger btn-sm" onClick={onDisconnect} disabled={busy}>
               Disconnect

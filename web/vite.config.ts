@@ -10,6 +10,9 @@ export default defineConfig({
       "/api": {
         target: "http://localhost:8088",
         changeOrigin: true,
+        // Large Fandango libraries can take several minutes to sync.
+        timeout: 0,
+        proxyTimeout: 0,
       },
     },
   },

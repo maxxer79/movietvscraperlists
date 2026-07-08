@@ -23,6 +23,17 @@ export interface MediaItem {
   quality?: string;
   posterUrl?: string;
   url?: string;
+  meta?: {
+    contentKind?: string;
+    isCollection?: boolean;
+    collectionCount?: number;
+    collectionItems?: Array<{
+      id: string;
+      title: string;
+      year?: number;
+      type?: string;
+    }>;
+  };
 }
 
 export interface CombinedItem extends MediaItem {
@@ -34,3 +45,13 @@ export type LoginStep =
   | { status: "success" }
   | { status: "need_input"; field: string; prompt: string }
   | { status: "error"; message: string };
+
+export interface ScrapeJobStatus {
+  jobId: string;
+  status: "running" | "done" | "error";
+  message: string;
+  count: number | null;
+  error?: string;
+  sessionExpired?: boolean;
+  snapshot?: { count: number };
+}
