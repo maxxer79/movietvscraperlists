@@ -21,6 +21,7 @@ import { createLogger } from "../logger.js";
 import {
   captureVuduAuthFromNetwork,
   clearStaleVuduSessionKeys,
+  cookieHeaderFromStorageState,
   describePageStorage,
   extractLightDeviceFromPage,
   extractLightDeviceFromStorageState,
@@ -32,7 +33,7 @@ import {
   injectVuduAuthIntoStorageState,
   isBundleItem,
   releaseYear,
-  renewVuduSessionInPage,
+  renewVuduSessionWithBrowserCookies,
   renewVuduSessionWithLightDevice,
   validateVuduAuth,
   vuduDetailUrl,
@@ -224,16 +225,16 @@ export class FandangoProvider implements Provider {
       await page.evaluate(() => window.scrollBy(0, 800)).catch(() => {});
       await page.waitForTimeout(1500);
 
-      // Prefer in-page renewal (includes Vudu cookies) over waiting on silent network.
+      // Prefer Playwright request API (browser cookies, bypasses patched page fetch).
       let auth: VuduAuth | null = null;
       const device = await extractLightDeviceFromPage(page);
       if (device?.lightDeviceKey) {
-        onProgress?.("Renewing Vudu session from inside the browser (with cookies)…", 0);
-        const renewed = await renewVuduSessionInPage(page, device, (msg) =>
+        onProgress?.("Renewing Vudu session with browser cookies…", 0);
+        const renewed = await renewVuduSessionWithBrowserCookies(page, device, (msg) =>
           onProgress?.(msg, 0)
         );
         auth = renewed ? await validateVuduAuth(renewed) : null;
-        if (auth) onProgress?.("In-page light-device renewal succeeded", 0);
+        if (auth) onProgress?.("Browser-cookie light-device renewal succeeded", 0);
       }
 
       if (!auth) {
@@ -267,7 +268,7 @@ export class FandangoProvider implements Provider {
           );
         }
         if (device?.lightDeviceKey) {
-          const renewed = await renewVuduSessionInPage(page, device, (msg) =>
+          const renewed = await renewVuduSessionWithBrowserCookies(page, device, (msg) =>
             onProgress?.(msg, 0)
           );
           auth = renewed ? await validateVuduAuth(renewed) : null;
@@ -357,8 +358,11 @@ export class FandangoProvider implements Provider {
       return null;
     }
     onProgress?.("Renewing Vudu session with light-device credentials…", 0);
-    const renewed = await renewVuduSessionWithLightDevice(device, (msg) =>
-      onProgress?.(msg, 0)
+    const cookie = cookieHeaderFromStorageState(storageStateJson);
+    const renewed = await renewVuduSessionWithLightDevice(
+      device,
+      (msg) => onProgress?.(msg, 0),
+      cookie
     );
     if (!renewed) {
       onProgress?.("Light-device renewal failed", 0);

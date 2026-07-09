@@ -444,12 +444,14 @@ export async function extractLightDeviceFromPage(page: Page): Promise<VuduLightD
  * Mint a fresh weakSessionKey using the SPA's light-device binding.
  * Cookie login can stay valid while sessionKeys expire; this is how the site renews.
  *
- * Prefer calling from the browser context (see renewVuduSessionInPage) so Vudu
- * cookies are included — Node fetch alone often fails without them.
+ * Prefer renewVuduSessionWithBrowserCookies when a Playwright context is available —
+ * Node fetch alone often fails without Vudu cookies, and page.evaluate(fetch) is
+ * blocked by Fandango's patched window.fetch in vudu_common.js.
  */
 export async function renewVuduSessionWithLightDevice(
   device: VuduLightDevice,
-  onAttempt?: (message: string) => void
+  onAttempt?: (message: string) => void,
+  cookieHeader?: string
 ): Promise<VuduAuth | null> {
   const attempts = buildLightDeviceRenewalAttempts(device);
   const errors: string[] = [];
@@ -458,7 +460,10 @@ export async function renewVuduSessionWithLightDevice(
     try {
       onAttempt?.(`Trying ${attempt.label}…`);
       const params = new URLSearchParams(attempt.params);
-      const data = await vuduGet(params, `sessionKeyRequest/${attempt.label}`);
+      const data = await vuduGet(params, `sessionKeyRequest/${attempt.label}`, {
+        cookie: cookieHeader,
+        method: attempt.method,
+      });
       const auth = extractVuduAuthFromPayload(data);
       if (auth) {
         log.info(
@@ -486,82 +491,141 @@ export async function renewVuduSessionWithLightDevice(
 
 function buildLightDeviceRenewalAttempts(
   device: VuduLightDevice
-): Array<{ label: string; params: Record<string, string> }> {
+): Array<{ label: string; method: "GET" | "POST"; params: Record<string, string> }> {
   const accountId = device.lightDeviceAccountId || device.accountId || device.userId;
-  const attempts: Array<{ label: string; params: Record<string, string> }> = [];
+  const attempts: Array<{
+    label: string;
+    method: "GET" | "POST";
+    params: Record<string, string>;
+  }> = [];
 
-  // Most likely shapes first — keep the matrix small so sync logs stay readable.
-  const variants: Array<{ claimedAppId: string; type: string }> = [
-    { claimedAppId: "html5app", type: "sessionKeyRequest" },
-    { claimedAppId: "myvudu", type: "sessionKeyRequest" },
-    { claimedAppId: "html5app", type: "lightDeviceSessionKeyRequest" },
-    { claimedAppId: "vuduandroid", type: "sessionKeyRequest" },
-  ];
+  // Vudu rejects lightDeviceId on sessionKeyRequest ("unexpected name 'lightDeviceId'").
+  // Keep lightDeviceId only for the dedicated light-device request type.
+  const push = (
+    label: string,
+    params: Record<string, string>,
+    method: "GET" | "POST" = "GET"
+  ) => {
+    attempts.push({ label: `${label} [${method}]`, method, params });
+  };
 
-  for (const { claimedAppId, type } of variants) {
+  for (const claimedAppId of ["html5app", "myvudu"] as const) {
     const base: Record<string, string> = {
       claimedAppId,
       format: "application/json",
-      _type: type,
+      _type: "sessionKeyRequest",
       lightDeviceKey: device.lightDeviceKey,
       weakSeconds: "2592000",
       followup: "user",
     };
-    if (device.lightDeviceId) base.lightDeviceId = device.lightDeviceId;
 
-    if (accountId && device.lightDeviceId) {
-      attempts.push({
-        label: `${claimedAppId}/${type} + device+account`,
-        params: {
-          ...base,
+    // Most important: key-only (this is what failed earlier only because lightDeviceId was attached).
+    push(`${claimedAppId}/sessionKeyRequest + lightDeviceKey`, { ...base });
+    push(`${claimedAppId}/sessionKeyRequest + lightDeviceKey`, { ...base }, "POST");
+
+    if (accountId) {
+      push(`${claimedAppId}/sessionKeyRequest + accountId`, {
+        ...base,
+        accountId,
+      });
+      push(
+        `${claimedAppId}/sessionKeyRequest + accountId`,
+        { ...base, accountId },
+        "POST"
+      );
+    }
+    if (device.userId && device.userId !== accountId) {
+      push(`${claimedAppId}/sessionKeyRequest + userId`, {
+        ...base,
+        userId: device.userId,
+      });
+    }
+    if (device.userName || device.email) {
+      push(`${claimedAppId}/sessionKeyRequest + userName`, {
+        ...base,
+        userName: device.userName || device.email || "",
+      });
+    }
+  }
+
+  // Dedicated light-device type — may accept lightDeviceId.
+  if (device.lightDeviceId) {
+    for (const claimedAppId of ["html5app", "myvudu"] as const) {
+      const lightBase: Record<string, string> = {
+        claimedAppId,
+        format: "application/json",
+        _type: "lightDeviceSessionKeyRequest",
+        lightDeviceKey: device.lightDeviceKey,
+        lightDeviceId: device.lightDeviceId,
+        weakSeconds: "2592000",
+        followup: "user",
+      };
+      push(`${claimedAppId}/lightDeviceSessionKeyRequest`, { ...lightBase });
+      if (accountId) {
+        push(`${claimedAppId}/lightDeviceSessionKeyRequest + accountId`, {
+          ...lightBase,
           accountId,
           lightDeviceAccountId: accountId,
-        },
-      });
+        });
+      }
     }
-    if (accountId) {
-      attempts.push({
-        label: `${claimedAppId}/${type} + accountId`,
-        params: { ...base, accountId },
-      });
-    }
-    attempts.push({
-      label: `${claimedAppId}/${type}`,
-      params: { ...base },
-    });
   }
+
   return attempts;
 }
 
+/** Build a Cookie header from Playwright storageState JSON. */
+export function cookieHeaderFromStorageState(storageStateJson: string): string | undefined {
+  try {
+    const state = JSON.parse(storageStateJson) as {
+      cookies?: Array<{ name: string; value: string; domain?: string }>;
+    };
+    const cookies = (state.cookies ?? []).filter((c) =>
+      /vudu\.com|fandango\.com/i.test(c.domain || "")
+    );
+    if (!cookies.length) return undefined;
+    return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Same renewal as renewVuduSessionWithLightDevice, but executed inside the page so
- * api.vudu.com receives the browser's Vudu cookies (Node fetch does not).
+ * Renew using Playwright's request API (browser cookies, bypasses patched page fetch).
  */
-export async function renewVuduSessionInPage(
+export async function renewVuduSessionWithBrowserCookies(
   page: Page,
   device: VuduLightDevice,
   onAttempt?: (message: string) => void
 ): Promise<VuduAuth | null> {
-  const attempts = buildLightDeviceRenewalAttempts(device).slice(0, 12);
+  const attempts = buildLightDeviceRenewalAttempts(device);
 
   for (const attempt of attempts) {
-    onAttempt?.(`In-page ${attempt.label}…`);
+    onAttempt?.(`Browser ${attempt.label}…`);
     try {
-      const result = await page.evaluate(async (params) => {
-        const qs = new URLSearchParams(params).toString();
-        const url = `https://api.vudu.com/api2/?${qs}`;
-        const res = await fetch(url, {
-          credentials: "include",
-          headers: {
-            Accept: "application/json, text/javascript, */*",
-          },
-        });
-        const text = await res.text();
-        return { ok: res.ok, status: res.status, text: text.slice(0, 4000) };
-      }, attempt.params);
+      const qs = new URLSearchParams(attempt.params).toString();
+      const url = `${API_BASE}?${qs}`;
+      const res =
+        attempt.method === "POST"
+          ? await page.request.post(API_BASE, {
+              form: attempt.params,
+              headers: {
+                Accept: "application/json, text/javascript, */*",
+                Origin: "https://athome.fandango.com",
+                Referer: "https://athome.fandango.com/",
+              },
+            })
+          : await page.request.get(url, {
+              headers: {
+                Accept: "application/json, text/javascript, */*",
+                Origin: "https://athome.fandango.com",
+                Referer: "https://athome.fandango.com/",
+              },
+            });
 
-      if (!result.ok) {
-        const msg = `${attempt.label}: HTTP ${result.status}`;
+      const text = await res.text();
+      if (!res.ok()) {
+        const msg = `${attempt.label}: HTTP ${res.status()}`;
         log.warn(msg);
         onAttempt?.(msg);
         continue;
@@ -569,9 +633,9 @@ export async function renewVuduSessionInPage(
 
       let data: Record<string, unknown>;
       try {
-        data = parseVuduJson(result.text);
+        data = parseVuduJson(text);
       } catch {
-        const msg = `${attempt.label}: bad JSON`;
+        const msg = `${attempt.label}: bad JSON (${text.slice(0, 80)})`;
         onAttempt?.(msg);
         continue;
       }
@@ -579,8 +643,9 @@ export async function renewVuduSessionInPage(
       const type = vuduStr(data, "_type");
       if (type === "error") {
         const code = vuduStr(data, "code") || "unknown";
-        const text = vuduStr(data, "text") || code;
-        const msg = `${attempt.label}: ${code} / ${text}`;
+        const sub = vuduStr(data, "subCode");
+        const errText = vuduStr(data, "text") || code;
+        const msg = `${attempt.label}: ${[code, sub, errText].filter(Boolean).join(" / ")}`;
         log.warn(msg);
         onAttempt?.(msg);
         continue;
@@ -589,9 +654,9 @@ export async function renewVuduSessionInPage(
       const auth = extractVuduAuthFromPayload(data);
       if (auth) {
         log.info(
-          `In-page renewed Vudu session via ${attempt.label} (userId ${auth.userId.slice(0, 6)}…)`
+          `Browser-cookie renewed Vudu session via ${attempt.label} (userId ${auth.userId.slice(0, 6)}…)`
         );
-        onAttempt?.(`Succeeded with in-page ${attempt.label}`);
+        onAttempt?.(`Succeeded with ${attempt.label}`);
         return auth;
       }
       onAttempt?.(`${attempt.label}: response had no sessionKey`);
@@ -602,6 +667,15 @@ export async function renewVuduSessionInPage(
     }
   }
   return null;
+}
+
+/** @deprecated Use renewVuduSessionWithBrowserCookies — page fetch is patched by Fandango. */
+export async function renewVuduSessionInPage(
+  page: Page,
+  device: VuduLightDevice,
+  onAttempt?: (message: string) => void
+): Promise<VuduAuth | null> {
+  return renewVuduSessionWithBrowserCookies(page, device, onAttempt);
 }
 
 /** Drop expired session keys so the SPA is forced to remint on next navigation. */
@@ -615,7 +689,8 @@ export async function clearStaleVuduSessionKeys(page: Page): Promise<void> {
         return key;
       }
     };
-    const dropLogical = /^(weakSessionKey|strongSessionKey|weakSessionKeyExpiration|mtv\.vudu\.weakSessionKey)$/i;
+    const dropLogical =
+      /^(weakSessionKey|strongSessionKey|weakSessionKeyExpiration|mtv\.vudu\.weakSessionKey)$/i;
     for (const store of [localStorage, sessionStorage]) {
       const keys: string[] = [];
       for (let i = 0; i < store.length; i++) {
@@ -859,21 +934,35 @@ function parseContentRow(row: Record<string, unknown>): VuduContentItem | null {
 
 async function vuduGet(
   params: URLSearchParams,
-  context: string
+  context: string,
+  opts?: { cookie?: string; method?: "GET" | "POST" }
 ): Promise<Record<string, unknown>> {
-  const url = `${API_BASE}?${params.toString()}`;
+  const method = opts?.method ?? "GET";
+  const headers: Record<string, string> = {
+    Accept: "application/json, text/javascript, */*",
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    Referer: "https://athome.fandango.com/",
+    Origin: "https://athome.fandango.com",
+  };
+  if (opts?.cookie) headers.Cookie = opts.cookie;
+
   let res: Response;
   try {
-    res = await fetch(url, {
-      signal: AbortSignal.timeout(60_000),
-      headers: {
-        Accept: "application/json, text/javascript, */*",
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        Referer: "https://athome.fandango.com/",
-        Origin: "https://athome.fandango.com",
-      },
-    });
+    if (method === "POST") {
+      headers["Content-Type"] = "application/x-www-form-urlencoded";
+      res = await fetch(API_BASE, {
+        method: "POST",
+        signal: AbortSignal.timeout(60_000),
+        headers,
+        body: params.toString(),
+      });
+    } else {
+      res = await fetch(`${API_BASE}?${params.toString()}`, {
+        signal: AbortSignal.timeout(60_000),
+        headers,
+      });
+    }
   } catch (err) {
     throw new Error(`Vudu API network failure (${context}): ${(err as Error).message}`);
   }
