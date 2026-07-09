@@ -28,6 +28,7 @@ import {
   injectVuduAuthIntoLocalStorage,
   isBundleItem,
   releaseYear,
+  validateVuduAuth,
   vuduDetailUrl,
   type VuduAuth,
 } from "./vuduApi.js";
@@ -191,9 +192,10 @@ export class FandangoProvider implements Provider {
   ): Promise<MediaItem[]> {
     const page = await context.newPage();
     try {
-      onProgress?.("Opening Fandango in browser to capture API credentials…", 0);
+      onProgress?.("Opening Fandango in browser to refresh API credentials…", 0);
 
-      // Start listening BEFORE navigation so we catch the SPA's first library API calls.
+      // Listen BEFORE navigation so we catch the SPA's first library API calls
+      // (those carry a live sessionKey even when localStorage still has stale ones).
       const networkAuthPromise = captureVuduAuthFromNetwork(page, 60_000);
 
       await page.goto("https://athome.fandango.com/content/browse/mymovies", {
@@ -204,29 +206,50 @@ export class FandangoProvider implements Provider {
       await dismissCookieBanner(page);
 
       if (/\/content\/account\/login/i.test(page.url())) {
-        throw new SessionExpiredError();
+        throw new SessionExpiredError(
+          "Fandango session expired. Disconnect, Connect again (complete any email code), then Sync."
+        );
       }
 
-      // Try storage first (fast), then wait for network capture.
-      let auth = await extractVuduAuth(page);
+      // Prefer network-captured auth: storage may still hold expired keys.
+      onProgress?.("Waiting for live Vudu API session from the page…", 0);
+      await page.evaluate(() => window.scrollBy(0, 800)).catch(() => {});
+      await page.waitForTimeout(2000);
+
+      let auth = await networkAuthPromise;
+      if (auth) {
+        onProgress?.("Validating live API session…", 0);
+        auth = await validateVuduAuth(auth);
+        if (!auth) {
+          onProgress?.("Network session still expired — checking page storage…", 0);
+        }
+      }
       if (!auth) {
-        onProgress?.("Listening for Vudu API requests to capture session…", 0);
-        // Nudge the SPA to load more library traffic.
-        await page.evaluate(() => window.scrollBy(0, 800)).catch(() => {});
-        await page.waitForTimeout(2000);
-        auth = (await extractVuduAuth(page)) || (await networkAuthPromise);
+        const stored = await extractVuduAuth(page);
+        if (stored) {
+          onProgress?.("Validating tokens found in page storage…", 0);
+          auth = await validateVuduAuth(stored);
+          if (!auth) {
+            onProgress?.("Stored tokens still expired — trying TV page…", 0);
+          }
+        }
       }
 
       if (!auth) {
-        // One more try: visit TV library too (may trigger more API calls).
-        onProgress?.("Trying TV library page for API credentials…", 0);
+        onProgress?.("Trying TV library page for live API credentials…", 0);
         const tvAuthPromise = captureVuduAuthFromNetwork(page, 30_000);
         await page.goto("https://athome.fandango.com/content/browse/mytv", {
           waitUntil: "domcontentloaded",
           timeout: 60_000,
         });
         await page.waitForTimeout(3000);
-        auth = (await extractVuduAuth(page)) || (await tvAuthPromise);
+        if (/\/content\/account\/login/i.test(page.url())) {
+          throw new SessionExpiredError(
+            "Fandango session expired. Disconnect, Connect again (complete any email code), then Sync."
+          );
+        }
+        const tvAuth = (await tvAuthPromise) || (await extractVuduAuth(page));
+        auth = tvAuth ? await validateVuduAuth(tvAuth) : null;
       }
 
       if (auth) {
@@ -234,23 +257,21 @@ export class FandangoProvider implements Provider {
         try {
           const storageState = JSON.stringify(await context.storageState());
           saveSession(this.id, storageState);
-          onProgress?.("Saved API credentials for next sync", 0);
+          onProgress?.("Saved refreshed API credentials for next sync", 0);
         } catch (err) {
           log.warn("Could not re-save session with Vudu credentials", err);
         }
 
         log.info(`Using Vudu API via browser (userId ${auth.userId.slice(0, 6)}…)`);
-        onProgress?.("Using fast API sync (credentials captured)…", 0);
+        onProgress?.("Using fast API sync (credentials refreshed)…", 0);
         return this.scrapeViaApi(auth, onProgress);
       }
 
       const storageDump = await describePageStorage(page);
-      log.error(`Could not capture Vudu auth. ${storageDump}`);
+      log.error(`Could not capture live Vudu auth. ${storageDump}`);
       onProgress?.(`Auth capture failed. ${storageDump}`, 0);
-      throw new Error(
-        "Could not capture Fandango/Vudu API credentials from the browser. " +
-          "Disconnect, Connect again (complete any email code), then Sync. " +
-          "DOM scrolling is disabled because it cannot load 1000+ titles reliably."
+      throw new SessionExpiredError(
+        "Could not refresh Fandango/Vudu API credentials. Disconnect, Connect again (complete any email code), then Sync."
       );
     } finally {
       await page.close().catch(() => {});
@@ -259,7 +280,8 @@ export class FandangoProvider implements Provider {
 
   /**
    * Lightweight sync: read saved session credentials and call the Vudu API directly.
-   * Avoids launching Chromium — critical for large libraries in Docker.
+   * Returns null if credentials are missing OR expired so the caller can open a
+   * browser to refresh them. Avoids launching Chromium on the happy path.
    */
   async scrapeFromStorageState(
     storageStateJson: string,
@@ -272,7 +294,19 @@ export class FandangoProvider implements Provider {
     }
     log.info(`Light Vudu API sync (userId ${auth.userId.slice(0, 6)}…)`);
     onProgress?.("Using fast API sync (no browser)…", 0);
-    return this.scrapeViaApi(auth, onProgress);
+    try {
+      return await this.scrapeViaApi(auth, onProgress);
+    } catch (err) {
+      if (err instanceof SessionExpiredError) {
+        onProgress?.(
+          "Saved API tokens expired — opening browser to refresh session…",
+          0
+        );
+        log.warn("Light API sync hit expired session — falling back to browser refresh");
+        return null;
+      }
+      throw err;
+    }
   }
 
   /** Paginated api.vudu.com contentSearch — reliable for 1000+ titles. listType rentedOrOwned excludes wishlist. */

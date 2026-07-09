@@ -220,6 +220,7 @@ async function runScrapeJob(
     };
 
     // Fandango: prefer direct Vudu API using saved session (no Chromium).
+    // If tokens are missing/expired, fall through to browser refresh below.
     if (provider.id === "fandango") {
       const items = await (provider as FandangoProvider).scrapeFromStorageState(
         storageState,
@@ -238,8 +239,8 @@ async function runScrapeJob(
         log.info(`${provider.id} scrape job ${job.id} finished (light API): ${snapshot.count} items`);
         return;
       }
-      jobProgress(job, "No API credentials in saved session — opening browser (slower)…");
-      log.warn(`${provider.id}: no API credentials in saved session — falling back to browser`);
+      jobProgress(job, "Opening browser to refresh Fandango session…");
+      log.warn(`${provider.id}: light API path unavailable — refreshing via browser`);
     }
 
     const context = await newContext(storageState);

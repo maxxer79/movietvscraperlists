@@ -274,8 +274,7 @@ export function extractVuduAuthFromUrl(url: string): VuduAuth | null {
 
 /**
  * Listen for api.vudu.com traffic and capture sessionKey/userId from request URLs.
- * The modern Fandango SPA often keeps tokens in memory / IndexedDB, but still
- * sends them on every library API call.
+ * Prefers auth from successful API responses so we don't lock onto a stale first request.
  */
 export async function captureVuduAuthFromNetwork(
   page: Page,
@@ -283,6 +282,8 @@ export async function captureVuduAuthFromNetwork(
 ): Promise<VuduAuth | null> {
   return new Promise((resolve) => {
     let settled = false;
+    let lastCandidate: VuduAuth | null = null;
+
     const finish = (auth: VuduAuth | null) => {
       if (settled) return;
       settled = true;
@@ -292,22 +293,54 @@ export async function captureVuduAuthFromNetwork(
       resolve(auth);
     };
 
-    const considerUrl = (url: string) => {
-      if (!/api\.vudu\.com/i.test(url)) return;
-      const auth = extractVuduAuthFromUrl(url);
-      if (auth) {
-        log.info(`Captured Vudu auth from network request (userId ${auth.userId.slice(0, 6)}…)`);
-        finish(auth);
-      }
+    const considerUrl = (url: string): VuduAuth | null => {
+      if (!/api\.vudu\.com/i.test(url)) return null;
+      return extractVuduAuthFromUrl(url);
     };
 
-    const onRequest = (req: { url: () => string }) => considerUrl(req.url());
-    const onResponse = (res: { url: () => string }) => considerUrl(res.url());
+    const onRequest = (req: { url: () => string }) => {
+      const auth = considerUrl(req.url());
+      if (auth) lastCandidate = auth;
+    };
+
+    const onResponse = (res: {
+      url: () => string;
+      status: () => number;
+      json: () => Promise<unknown>;
+    }) => {
+      void (async () => {
+        if (settled) return;
+        const auth = considerUrl(res.url());
+        if (!auth) return;
+        lastCandidate = auth;
+        if (res.status() !== 200) return;
+        try {
+          const data = (await res.json()) as Record<string, unknown>;
+          const code = vuduStr(data, "code");
+          if (code === "authenticationExpired" || code === "accessDenied") {
+            return;
+          }
+          log.info(
+            `Captured Vudu auth from successful API response (userId ${auth.userId.slice(0, 6)}…)`
+          );
+          finish(auth);
+        } catch {
+          // Non-JSON 200 — keep as candidate; don't finish yet.
+        }
+      })();
+    };
 
     page.on("request", onRequest);
     page.on("response", onResponse);
 
-    const timer = setTimeout(() => finish(null), timeoutMs);
+    const timer = setTimeout(() => {
+      if (lastCandidate) {
+        log.info(
+          `Using last-seen Vudu auth from network (userId ${lastCandidate.userId.slice(0, 6)}…)`
+        );
+      }
+      finish(lastCandidate);
+    }, timeoutMs);
   });
 }
 
@@ -525,6 +558,7 @@ export async function fetchVuduLibraryWithFallback(
   }
 
   let lastErr: Error | null = null;
+  let sawExpired = false;
   for (const attempt of attempts) {
     try {
       onAttempt?.(`Trying ${attempt.label}…`);
@@ -536,17 +570,72 @@ export async function fetchVuduLibraryWithFallback(
       onAttempt?.(`Succeeded with ${attempt.label}`);
       return rows;
     } catch (err) {
-      // Expired sessions fail the same way for every appId — don't burn time retrying.
-      if (err instanceof SessionExpiredError) {
-        onAttempt?.(err.message);
-        throw err;
-      }
       lastErr = err as Error;
+      if (err instanceof SessionExpiredError) {
+        sawExpired = true;
+        onAttempt?.(`${attempt.label}: session rejected`);
+        continue;
+      }
       log.warn(`${attempt.label} failed: ${lastErr.message}`);
       onAttempt?.(`${attempt.label} failed: ${lastErr.message}`);
     }
   }
+  if (sawExpired && (!lastErr || lastErr instanceof SessionExpiredError)) {
+    throw new SessionExpiredError(
+      "Fandango session expired. Disconnect, Connect again (complete any email code), then Sync."
+    );
+  }
   throw lastErr ?? new Error("All Vudu API auth variants failed");
+}
+
+/**
+ * Quick probe: returns auth with the working sessionKey as primary, or null if
+ * every variant is rejected as expired. Transient network errors also yield null
+ * (caller should not clear the browser session for those alone — scrapeLibrary
+ * only clears when login redirect / total capture failure).
+ */
+export async function validateVuduAuth(auth: VuduAuth): Promise<VuduAuth | null> {
+  const probe = async (claimedAppId: string, sessionKey: string) => {
+    const params = new URLSearchParams();
+    params.set("claimedAppId", claimedAppId);
+    params.set("format", "application/json");
+    params.set("_type", "contentSearch");
+    params.set("count", "1");
+    params.set("dimensionality", "any");
+    params.set("listType", "rentedOrOwned");
+    params.set("sessionKey", sessionKey);
+    params.set("sortBy", "title");
+    params.set("superType", "movies");
+    params.set("userId", auth.userId);
+    params.set("offset", "0");
+    params.append("type", "program");
+    await vuduGet(params, `auth-probe/${claimedAppId}`);
+  };
+
+  const keys = [...new Set([auth.sessionKey, auth.strongSessionKey].filter(
+    (k): k is string => Boolean(k)
+  ))];
+  for (const claimedAppId of ["html5app", "myvudu"] as const) {
+    for (const sessionKey of keys) {
+      try {
+        await probe(claimedAppId, sessionKey);
+        return {
+          ...auth,
+          sessionKey,
+          strongSessionKey:
+            auth.strongSessionKey && auth.strongSessionKey !== sessionKey
+              ? auth.strongSessionKey
+              : auth.sessionKey !== sessionKey
+                ? auth.sessionKey
+                : auth.strongSessionKey,
+        };
+      } catch (err) {
+        if (err instanceof SessionExpiredError) continue;
+        log.warn(`Auth probe ${claimedAppId} failed: ${(err as Error).message}`);
+      }
+    }
+  }
+  return null;
 }
 
 /** Individual movies/shows inside a bundle/collection (containerId lookup). */
