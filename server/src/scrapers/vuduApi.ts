@@ -27,6 +27,16 @@ export function parseVuduJson(text: string): Record<string, unknown> {
 }
 
 
+function decodeHoggleKey(key: string): string {
+  if (!key.startsWith("hoggle")) return key;
+  try {
+    const b64 = decodeURIComponent(key.slice("hoggle".length));
+    return Buffer.from(b64, "base64").toString("utf8") || key;
+  } catch {
+    return key;
+  }
+}
+
 function considerAuthEntry(
   key: string,
   val: string,
@@ -34,15 +44,21 @@ function considerAuthEntry(
 ): void {
   if (!val || !val.trim()) return;
 
+  const logical = decodeHoggleKey(key);
+
   // Prefer weakSessionKey; also accept sessionKey / weakSession variants.
-  if (/weakSessionKey$/i.test(key) && val) out.sessionKey = val;
-  else if (!out.sessionKey && /sessionKey$/i.test(key) && !/csrf/i.test(key) && val.length > 8) {
+  if (/weakSessionKey$/i.test(logical) && val) out.sessionKey = val;
+  else if (
+    !out.sessionKey &&
+    /^(strong)?[Ss]essionKey$/i.test(logical) &&
+    !/csrf/i.test(logical) &&
+    val.length > 8
+  ) {
     out.sessionKey = val;
   }
 
-  if (/userID$/i.test(key) && val) out.userId = val;
-  else if (/userId$/i.test(key) && val) out.userId = val;
-  else if (!out.userId && /^user[_-]?id$/i.test(key) && /^\d+$/.test(val)) out.userId = val;
+  if (/^(userID|userId|accountId)$/i.test(logical) && val) out.userId = val;
+  else if (!out.userId && /^user[_-]?id$/i.test(logical) && /^\d+$/.test(val)) out.userId = val;
 
   if ((!out.sessionKey || !out.userId) && val.trim().startsWith("{")) {
     try {
@@ -106,14 +122,32 @@ export async function extractVuduAuth(page: Page): Promise<VuduAuth | null> {
   const auth = await page.evaluate(() => {
     const out: { sessionKey?: string; userId?: string } = {};
 
+    const decodeHoggle = (key: string): string => {
+      if (!key.startsWith("hoggle")) return key;
+      try {
+        const b64 = decodeURIComponent(key.slice("hoggle".length));
+        // atob is available in the browser context
+        return atob(b64) || key;
+      } catch {
+        return key;
+      }
+    };
+
     const consider = (key: string, val: string) => {
       if (!val) return;
-      if (/weakSessionKey$/i.test(key)) out.sessionKey = val;
-      else if (!out.sessionKey && /sessionKey$/i.test(key) && !/csrf/i.test(key) && val.length > 8) {
+      const logical = decodeHoggle(key);
+
+      if (/weakSessionKey$/i.test(logical)) out.sessionKey = val;
+      else if (
+        !out.sessionKey &&
+        /^(strong)?[Ss]essionKey$/i.test(logical) &&
+        !/csrf/i.test(logical) &&
+        val.length > 8
+      ) {
         out.sessionKey = val;
       }
-      if (/userID$/i.test(key) || /userId$/i.test(key)) out.userId = val;
-      else if (!out.userId && /^user[_-]?id$/i.test(key) && /^\d+$/.test(val)) out.userId = val;
+      if (/^(userID|userId|accountId)$/i.test(logical)) out.userId = val;
+      else if (!out.userId && /^user[_-]?id$/i.test(logical) && /^\d+$/.test(val)) out.userId = val;
 
       if ((!out.sessionKey || !out.userId) && val.trim().startsWith("{")) {
         try {
@@ -156,6 +190,8 @@ export async function extractVuduAuth(page: Page): Promise<VuduAuth | null> {
     log.warn(
       `No Vudu auth in page storage (local=${auth.localKeys?.length ?? 0}, session=${auth.sessionKeys?.length ?? 0}) keys local=[${(auth.localKeys || []).slice(0, 30).join(",")}] session=[${(auth.sessionKeys || []).slice(0, 30).join(",")}]`
     );
+  } else {
+    log.info(`Extracted Vudu auth from page storage (userId ${result.userId.slice(0, 6)}…)`);
   }
   return result;
 }
@@ -222,8 +258,16 @@ export async function captureVuduAuthFromNetwork(
 export async function describePageStorage(page: Page): Promise<string> {
   try {
     return await page.evaluate(() => {
-      const local = Object.keys(localStorage);
-      const session = Object.keys(sessionStorage);
+      const decode = (key: string): string => {
+        if (!key.startsWith("hoggle")) return key;
+        try {
+          return atob(decodeURIComponent(key.slice("hoggle".length))) || key;
+        } catch {
+          return key;
+        }
+      };
+      const local = Object.keys(localStorage).map(decode);
+      const session = Object.keys(sessionStorage).map(decode);
       return `localStorage(${local.length}): ${local.slice(0, 40).join(", ") || "(empty)"}; sessionStorage(${session.length}): ${session.slice(0, 40).join(", ") || "(empty)"}`;
     });
   } catch {
