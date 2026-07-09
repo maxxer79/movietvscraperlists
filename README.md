@@ -25,7 +25,8 @@ Supported services:
 
 - **Apple-style UI** — rounded buttons, drop shadows, frosted panels, **dark mode by default** (with a light toggle).
 - **Assisted login** with full 2-factor support, handled right in the web UI.
-- **One combined library** across all connected services, with search, filters (service / quality) and sorting.
+- **One combined library** across all connected services — same title merges into **one card** with retailer badges; search, filters (service / quality), and sorting included.
+- **Removal tracking** when a retailer drops a title from your account (badge disappears; Removed tab lists the loss).
 - **Export** the whole list or a single service to **CSV** or **JSON**.
 - **Version badge** on the page — every build bumps the number so you always know what's live.
 - **Single container** — API + web served together. Ready for Portainer + Caddy.
