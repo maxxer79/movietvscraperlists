@@ -28,7 +28,24 @@ const getVal = (flag) => {
   return i >= 0 ? args[i + 1] : undefined;
 };
 
-const data = JSON.parse(readFileSync(versionFile, "utf8"));
+const raw = readFileSync(versionFile, "utf8");
+if (raw.includes("<<<<<<<") || raw.includes(">>>>>>>") || raw.includes("=======")) {
+  console.error(
+    `ERROR: ${versionFile} contains unresolved git conflict markers.\n` +
+      `Fix version.json before bumping. Expected clean JSON like:\n` +
+      `{\n  "version": "0.1.0",\n  "build": 1,\n  "releasedAt": "...",\n  "codename": "..."\n}`
+  );
+  process.exit(1);
+}
+
+let data;
+try {
+  data = JSON.parse(raw);
+} catch (err) {
+  console.error(`ERROR: Could not parse ${versionFile}: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
+
 let [major, minor, patch] = String(data.version).split(".").map((n) => parseInt(n, 10) || 0);
 
 const setTo = getVal("--set");
