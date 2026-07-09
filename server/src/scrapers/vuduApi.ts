@@ -13,6 +13,17 @@ export interface VuduAuth {
   accountId?: string;
 }
 
+/** Device-bound credentials used by the Fandango SPA to mint a fresh sessionKey. */
+export interface VuduLightDevice {
+  lightDeviceKey: string;
+  lightDeviceId?: string;
+  lightDeviceAccountId?: string;
+  userId?: string;
+  accountId?: string;
+  userName?: string;
+  email?: string;
+}
+
 /** Vudu wraps every scalar in a single-element array: { title: ["Matrix"] } */
 export function vuduStr(obj: Record<string, unknown>, key: string): string | undefined {
   const v = obj[key];
@@ -253,6 +264,10 @@ export async function extractVuduAuth(page: Page): Promise<VuduAuth | null> {
   return result;
 }
 
+function isVuduApiUrl(url: string): boolean {
+  return /(?:^|\.)vudu\.com\/api/i.test(url) || /api(?:cache)?\.vudu\.com/i.test(url);
+}
+
 /** Pull sessionKey + userId out of a Vudu API URL (query string). */
 export function extractVuduAuthFromUrl(url: string): VuduAuth | null {
   try {
@@ -272,9 +287,218 @@ export function extractVuduAuthFromUrl(url: string): VuduAuth | null {
   }
 }
 
+/** Pull auth from application/x-www-form-urlencoded or query-like POST bodies. */
+export function extractVuduAuthFromBody(body: string | null | undefined): VuduAuth | null {
+  if (!body || !body.trim()) return null;
+  try {
+    const params = new URLSearchParams(body.startsWith("{") ? "" : body);
+    if (![...params.keys()].length && body.includes("=")) {
+      // already tried URLSearchParams
+    }
+    const sessionKey =
+      params.get("sessionKey") || params.get("weakSessionKey") || undefined;
+    const userId =
+      params.get("userId") || params.get("userID") || params.get("accountId") || undefined;
+    const fromParams = finalizeAuth({
+      sessionKey: sessionKey || undefined,
+      userId: userId || undefined,
+    });
+    if (fromParams) return fromParams;
+
+    if (body.trim().startsWith("{") || body.includes("/*-secure-")) {
+      const data = body.includes("/*-secure-")
+        ? parseVuduJson(body)
+        : (JSON.parse(body) as Record<string, unknown>);
+      return extractVuduAuthFromPayload(data);
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/** Walk a Vudu API JSON payload for sessionKey / userId (handles nested sessionKey objects). */
+export function extractVuduAuthFromPayload(data: Record<string, unknown>): VuduAuth | null {
+  const out: {
+    sessionKey?: string;
+    strongSessionKey?: string;
+    userId?: string;
+    accountId?: string;
+  } = {};
+
+  const skRoot = data.sessionKey;
+  if (Array.isArray(skRoot) && skRoot[0] && typeof skRoot[0] === "object") {
+    const nested = skRoot[0] as Record<string, unknown>;
+    const key = vuduStr(nested, "sessionKey") || vuduStr(nested, "weakSessionKey");
+    const uid = vuduStr(nested, "userId") || vuduStr(nested, "userID");
+    if (key) out.sessionKey = key;
+    if (uid) out.userId = uid;
+  }
+
+  walkObjectForAuth(data, out, 0);
+  const directKey = vuduStr(data, "sessionKey") || vuduStr(data, "weakSessionKey");
+  const directUser = vuduStr(data, "userId") || vuduStr(data, "userID");
+  if (directKey) out.sessionKey = out.sessionKey || directKey;
+  if (directUser) out.userId = out.userId || directUser;
+
+  return finalizeAuth(out);
+}
+
+function considerLightDeviceEntry(
+  key: string,
+  val: string,
+  out: VuduLightDevice & { _seen?: boolean }
+): void {
+  if (!val || !val.trim()) return;
+  const logical = decodeHoggleKey(key);
+  let value = val;
+  try {
+    if (/%[0-9A-Fa-f]{2}/.test(val)) value = decodeURIComponent(val);
+  } catch {
+    value = val;
+  }
+  if (/^lightDeviceKey$/i.test(logical)) {
+    out.lightDeviceKey = value;
+    out._seen = true;
+  } else if (/^lightDeviceId$/i.test(logical)) out.lightDeviceId = value;
+  else if (/^lightDeviceAccountId$/i.test(logical)) out.lightDeviceAccountId = value;
+  else if (/^(userID|userId)$/i.test(logical)) out.userId = value;
+  else if (/^accountId$/i.test(logical)) out.accountId = value;
+  else if (/^(userName|username)$/i.test(logical)) out.userName = value;
+  else if (/^email$/i.test(logical)) out.email = value;
+}
+
+/** Read light-device credentials from Playwright storageState (no browser). */
+export function extractLightDeviceFromStorageState(
+  storageStateJson: string
+): VuduLightDevice | null {
+  try {
+    const state = JSON.parse(storageStateJson) as {
+      origins?: Array<{ localStorage?: Array<{ name: string; value: string }> }>;
+    };
+    const out: VuduLightDevice & { _seen?: boolean } = { lightDeviceKey: "" };
+    for (const origin of state.origins ?? []) {
+      for (const entry of origin.localStorage ?? []) {
+        considerLightDeviceEntry(entry.name, entry.value, out);
+      }
+    }
+    if (!out.lightDeviceKey) return null;
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Read light-device credentials from the live page. */
+export async function extractLightDeviceFromPage(page: Page): Promise<VuduLightDevice | null> {
+  const raw = await page.evaluate(() => {
+    const out: Record<string, string> = {};
+    const decodeHoggle = (key: string): string => {
+      if (!key.startsWith("hoggle")) return key;
+      try {
+        return atob(decodeURIComponent(key.slice("hoggle".length))) || key;
+      } catch {
+        return key;
+      }
+    };
+    const scan = (store: Storage) => {
+      for (let i = 0; i < store.length; i++) {
+        const key = store.key(i);
+        if (!key) continue;
+        const logical = decodeHoggle(key);
+        const val = store.getItem(key) || "";
+        let value = val;
+        try {
+          if (/%[0-9A-Fa-f]{2}/.test(val)) value = decodeURIComponent(val);
+        } catch {
+          value = val;
+        }
+        if (
+          /^(lightDeviceKey|lightDeviceId|lightDeviceAccountId|userId|userID|accountId|userName|username|email)$/i.test(
+            logical
+          )
+        ) {
+          out[logical] = value;
+        }
+      }
+    };
+    scan(localStorage);
+    scan(sessionStorage);
+    return out;
+  });
+
+  const lightDeviceKey = raw.lightDeviceKey;
+  if (!lightDeviceKey) return null;
+  return {
+    lightDeviceKey,
+    lightDeviceId: raw.lightDeviceId,
+    lightDeviceAccountId: raw.lightDeviceAccountId,
+    userId: raw.userId || raw.userID,
+    accountId: raw.accountId,
+    userName: raw.userName || raw.username,
+    email: raw.email,
+  };
+}
+
 /**
- * Listen for api.vudu.com traffic and capture sessionKey/userId from request URLs.
- * Prefers auth from successful API responses so we don't lock onto a stale first request.
+ * Mint a fresh weakSessionKey using the SPA's light-device binding.
+ * Cookie login can stay valid while sessionKeys expire; this is how the site renews.
+ */
+export async function renewVuduSessionWithLightDevice(
+  device: VuduLightDevice
+): Promise<VuduAuth | null> {
+  const accountId = device.lightDeviceAccountId || device.accountId || device.userId;
+  const attempts: Array<{ label: string; params: Record<string, string> }> = [];
+
+  for (const claimedAppId of ["html5app", "myvudu", "vuduandroid"] as const) {
+    const base: Record<string, string> = {
+      claimedAppId,
+      format: "application/json",
+      _type: "sessionKeyRequest",
+      lightDeviceKey: device.lightDeviceKey,
+      weakSeconds: "2592000",
+    };
+    if (device.lightDeviceId) base.lightDeviceId = device.lightDeviceId;
+    if (accountId) {
+      attempts.push({
+        label: `${claimedAppId} + lightDeviceKey + accountId`,
+        params: { ...base, accountId },
+      });
+    }
+    if (device.userId) {
+      attempts.push({
+        label: `${claimedAppId} + lightDeviceKey + userId`,
+        params: { ...base, userId: device.userId },
+      });
+    }
+    attempts.push({
+      label: `${claimedAppId} + lightDeviceKey only`,
+      params: { ...base },
+    });
+  }
+
+  for (const attempt of attempts) {
+    try {
+      const params = new URLSearchParams(attempt.params);
+      const data = await vuduGet(params, `sessionKeyRequest/${attempt.label}`);
+      const auth = extractVuduAuthFromPayload(data);
+      if (auth) {
+        log.info(
+          `Renewed Vudu session via ${attempt.label} (userId ${auth.userId.slice(0, 6)}…)`
+        );
+        return auth;
+      }
+      log.warn(`${attempt.label}: response had no sessionKey`);
+    } catch (err) {
+      log.warn(`${attempt.label} failed: ${(err as Error).message}`);
+    }
+  }
+  return null;
+}
+
+/**
+ * Listen for Vudu API traffic and capture sessionKey/userId from URLs, POST bodies,
+ * and Vudu's secure-wrapped JSON responses (res.json() fails on that wrapper).
  */
 export async function captureVuduAuthFromNetwork(
   page: Page,
@@ -283,6 +507,7 @@ export async function captureVuduAuthFromNetwork(
   return new Promise((resolve) => {
     let settled = false;
     let lastCandidate: VuduAuth | null = null;
+    let vuduHits = 0;
 
     const finish = (auth: VuduAuth | null) => {
       if (settled) return;
@@ -290,43 +515,78 @@ export async function captureVuduAuthFromNetwork(
       page.off("request", onRequest);
       page.off("response", onResponse);
       clearTimeout(timer);
+      if (!auth) {
+        log.warn(`Network auth capture timed out after ${vuduHits} Vudu API hit(s)`);
+      }
       resolve(auth);
     };
 
-    const considerUrl = (url: string): VuduAuth | null => {
-      if (!/api\.vudu\.com/i.test(url)) return null;
-      return extractVuduAuthFromUrl(url);
+    const accept = (auth: VuduAuth | null, source: string, finishNow: boolean) => {
+      if (!auth) return;
+      lastCandidate = auth;
+      log.info(
+        `Seen Vudu auth from ${source} (userId ${auth.userId.slice(0, 6)}…)`
+      );
+      if (finishNow) finish(auth);
     };
 
-    const onRequest = (req: { url: () => string }) => {
-      const auth = considerUrl(req.url());
-      if (auth) lastCandidate = auth;
+    const onRequest = (req: {
+      url: () => string;
+      postData: () => string | null;
+    }) => {
+      const url = req.url();
+      if (!isVuduApiUrl(url)) return;
+      vuduHits++;
+      // Request URLs often carry stale keys — keep as candidates only.
+      accept(extractVuduAuthFromUrl(url), "request URL", false);
+      accept(extractVuduAuthFromBody(req.postData()), "request body", false);
     };
 
     const onResponse = (res: {
       url: () => string;
       status: () => number;
-      json: () => Promise<unknown>;
+      text: () => Promise<string>;
+      request: () => { postData: () => string | null };
     }) => {
       void (async () => {
         if (settled) return;
-        const auth = considerUrl(res.url());
-        if (!auth) return;
-        lastCandidate = auth;
+        const url = res.url();
+        if (!isVuduApiUrl(url)) return;
+        vuduHits++;
         if (res.status() !== 200) return;
+
+        let text = "";
         try {
-          const data = (await res.json()) as Record<string, unknown>;
+          text = await res.text();
+        } catch {
+          return;
+        }
+
+        let data: Record<string, unknown> | null = null;
+        try {
+          data = parseVuduJson(text);
+        } catch {
+          try {
+            data = JSON.parse(text) as Record<string, unknown>;
+          } catch {
+            data = null;
+          }
+        }
+
+        if (data) {
           const code = vuduStr(data, "code");
           if (code === "authenticationExpired" || code === "accessDenied") {
+            // Stale key on the wire — keep listening for a renewal response.
             return;
           }
-          log.info(
-            `Captured Vudu auth from successful API response (userId ${auth.userId.slice(0, 6)}…)`
-          );
-          finish(auth);
-        } catch {
-          // Non-JSON 200 — keep as candidate; don't finish yet.
+          const fromBody = extractVuduAuthFromPayload(data);
+          if (fromBody) {
+            accept(fromBody, "response body", true);
+            return;
+          }
         }
+
+        accept(extractVuduAuthFromUrl(url), "response URL", false);
       })();
     };
 
@@ -371,6 +631,41 @@ export async function injectVuduAuthIntoLocalStorage(page: Page, auth: VuduAuth)
     localStorage.setItem("mtv.vudu.weakSessionKey", a.sessionKey);
     localStorage.setItem("mtv.vudu.userId", a.userId);
   }, auth);
+}
+
+/** Patch a Playwright storageState JSON string with refreshed Vudu API credentials. */
+export function injectVuduAuthIntoStorageState(
+  storageStateJson: string,
+  auth: VuduAuth
+): string {
+  const state = JSON.parse(storageStateJson) as {
+    origins?: Array<{
+      origin: string;
+      localStorage?: Array<{ name: string; value: string }>;
+    }>;
+  };
+  const origins = state.origins ?? [];
+  let target = origins.find((o) => /fandango\.com|vudu\.com/i.test(o.origin));
+  if (!target) {
+    target = {
+      origin: "https://athome.fandango.com",
+      localStorage: [],
+    };
+    origins.push(target);
+    state.origins = origins;
+  }
+  const ls = target.localStorage ?? [];
+  const upsert = (name: string, value: string) => {
+    const existing = ls.find((e) => e.name === name);
+    if (existing) existing.value = value;
+    else ls.push({ name, value });
+  };
+  upsert("mtv.vudu.weakSessionKey", auth.sessionKey);
+  upsert("mtv.vudu.userId", auth.userId);
+  upsert("weakSessionKey", auth.sessionKey);
+  upsert("userId", auth.userId);
+  target.localStorage = ls;
+  return JSON.stringify(state);
 }
 
 export interface VuduContentItem {

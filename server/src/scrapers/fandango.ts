@@ -21,13 +21,17 @@ import { createLogger } from "../logger.js";
 import {
   captureVuduAuthFromNetwork,
   describePageStorage,
+  extractLightDeviceFromPage,
+  extractLightDeviceFromStorageState,
   extractVuduAuth,
   extractVuduAuthFromStorageState,
   fetchBundleContents,
   fetchVuduLibraryWithFallback,
   injectVuduAuthIntoLocalStorage,
+  injectVuduAuthIntoStorageState,
   isBundleItem,
   releaseYear,
+  renewVuduSessionWithLightDevice,
   validateVuduAuth,
   vuduDetailUrl,
   type VuduAuth,
@@ -252,6 +256,24 @@ export class FandangoProvider implements Provider {
         auth = tvAuth ? await validateVuduAuth(tvAuth) : null;
       }
 
+      // Cookie login can remain valid while sessionKeys are dead. The SPA stores a
+      // lightDeviceKey that can mint a fresh weakSessionKey without a full reconnect.
+      if (!auth) {
+        onProgress?.("Renewing Vudu session with saved light-device credentials…", 0);
+        const device = await extractLightDeviceFromPage(page);
+        if (device?.lightDeviceKey) {
+          const renewed = await renewVuduSessionWithLightDevice(device);
+          auth = renewed ? await validateVuduAuth(renewed) : null;
+          if (auth) {
+            onProgress?.("Light-device renewal succeeded", 0);
+          } else {
+            onProgress?.("Light-device renewal did not yield a usable session", 0);
+          }
+        } else {
+          onProgress?.("No lightDeviceKey found in page storage", 0);
+        }
+      }
+
       if (auth) {
         await injectVuduAuthIntoLocalStorage(page, auth);
         try {
@@ -290,6 +312,9 @@ export class FandangoProvider implements Provider {
     const auth = extractVuduAuthFromStorageState(storageStateJson);
     if (!auth) {
       onProgress?.("Could not read Vudu credentials from saved session");
+      // Still try light-device renewal before forcing a browser open.
+      const renewed = await this.tryLightDeviceRenewal(storageStateJson, onProgress);
+      if (renewed) return this.scrapeViaApi(renewed, onProgress);
       return null;
     }
     log.info(`Light Vudu API sync (userId ${auth.userId.slice(0, 6)}…)`);
@@ -298,6 +323,15 @@ export class FandangoProvider implements Provider {
       return await this.scrapeViaApi(auth, onProgress);
     } catch (err) {
       if (err instanceof SessionExpiredError) {
+        onProgress?.("Saved API tokens expired — trying light-device renewal…", 0);
+        const renewed = await this.tryLightDeviceRenewal(storageStateJson, onProgress);
+        if (renewed) {
+          try {
+            return await this.scrapeViaApi(renewed, onProgress);
+          } catch (err2) {
+            if (!(err2 instanceof SessionExpiredError)) throw err2;
+          }
+        }
         onProgress?.(
           "Saved API tokens expired — opening browser to refresh session…",
           0
@@ -307,6 +341,36 @@ export class FandangoProvider implements Provider {
       }
       throw err;
     }
+  }
+
+  private async tryLightDeviceRenewal(
+    storageStateJson: string,
+    onProgress?: (message: string, itemsFound?: number) => void
+  ): Promise<VuduAuth | null> {
+    const device = extractLightDeviceFromStorageState(storageStateJson);
+    if (!device?.lightDeviceKey) {
+      onProgress?.("No lightDeviceKey in saved session", 0);
+      return null;
+    }
+    onProgress?.("Renewing Vudu session with light-device credentials…", 0);
+    const renewed = await renewVuduSessionWithLightDevice(device);
+    if (!renewed) {
+      onProgress?.("Light-device renewal failed", 0);
+      return null;
+    }
+    const ok = await validateVuduAuth(renewed);
+    if (!ok) {
+      onProgress?.("Renewed session still rejected by Vudu API", 0);
+      return null;
+    }
+    onProgress?.("Light-device renewal succeeded — continuing API sync", 0);
+    try {
+      const patched = injectVuduAuthIntoStorageState(storageStateJson, ok);
+      saveSession(this.id, patched);
+    } catch (err) {
+      log.warn("Could not re-save session after light-device renewal", err);
+    }
+    return ok;
   }
 
   /** Paginated api.vudu.com contentSearch — reliable for 1000+ titles. listType rentedOrOwned excludes wishlist. */
