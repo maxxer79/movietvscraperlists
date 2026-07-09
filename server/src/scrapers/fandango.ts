@@ -20,6 +20,7 @@ import {
 import { createLogger } from "../logger.js";
 import {
   captureVuduAuthFromNetwork,
+  clearStaleVuduSessionKeys,
   describePageStorage,
   extractLightDeviceFromPage,
   extractLightDeviceFromStorageState,
@@ -31,6 +32,7 @@ import {
   injectVuduAuthIntoStorageState,
   isBundleItem,
   releaseYear,
+  renewVuduSessionInPage,
   renewVuduSessionWithLightDevice,
   validateVuduAuth,
   vuduDetailUrl,
@@ -198,15 +200,12 @@ export class FandangoProvider implements Provider {
     try {
       onProgress?.("Opening Fandango in browser to refresh API credentials…", 0);
 
-      // Listen BEFORE navigation so we catch the SPA's first library API calls
-      // (those carry a live sessionKey even when localStorage still has stale ones).
-      const networkAuthPromise = captureVuduAuthFromNetwork(page, 60_000);
-
+      // Stale weak/strong keys poison the SPA — drop them so it remints or we renew.
       await page.goto("https://athome.fandango.com/content/browse/mymovies", {
         waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
-      await page.waitForTimeout(2500);
+      await page.waitForTimeout(1500);
       await dismissCookieBanner(page);
 
       if (/\/content\/account\/login/i.test(page.url())) {
@@ -215,62 +214,67 @@ export class FandangoProvider implements Provider {
         );
       }
 
-      // Prefer network-captured auth: storage may still hold expired keys.
-      onProgress?.("Waiting for live Vudu API session from the page…", 0);
-      await page.evaluate(() => window.scrollBy(0, 800)).catch(() => {});
-      await page.waitForTimeout(2000);
+      await clearStaleVuduSessionKeys(page);
+      onProgress?.("Cleared expired session keys — listening for a fresh Vudu API session…", 0);
 
-      let auth = await networkAuthPromise;
-      if (auth) {
-        onProgress?.("Validating live API session…", 0);
-        auth = await validateVuduAuth(auth);
-        if (!auth) {
-          onProgress?.("Network session still expired — checking page storage…", 0);
+      const networkAuthPromise = captureVuduAuthFromNetwork(page, 25_000);
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+      await page.waitForTimeout(2500);
+      await dismissCookieBanner(page);
+      await page.evaluate(() => window.scrollBy(0, 800)).catch(() => {});
+      await page.waitForTimeout(1500);
+
+      // Prefer in-page renewal (includes Vudu cookies) over waiting on silent network.
+      let auth: VuduAuth | null = null;
+      const device = await extractLightDeviceFromPage(page);
+      if (device?.lightDeviceKey) {
+        onProgress?.("Renewing Vudu session from inside the browser (with cookies)…", 0);
+        const renewed = await renewVuduSessionInPage(page, device, (msg) =>
+          onProgress?.(msg, 0)
+        );
+        auth = renewed ? await validateVuduAuth(renewed) : null;
+        if (auth) onProgress?.("In-page light-device renewal succeeded", 0);
+      }
+
+      if (!auth) {
+        onProgress?.("Waiting for live Vudu API session from the page…", 0);
+        const networkAuth = await networkAuthPromise;
+        if (networkAuth) {
+          onProgress?.("Validating live API session…", 0);
+          auth = await validateVuduAuth(networkAuth);
         }
       }
+
       if (!auth) {
         const stored = await extractVuduAuth(page);
         if (stored) {
           onProgress?.("Validating tokens found in page storage…", 0);
           auth = await validateVuduAuth(stored);
-          if (!auth) {
-            onProgress?.("Stored tokens still expired — trying TV page…", 0);
-          }
         }
       }
 
       if (!auth) {
         onProgress?.("Trying TV library page for live API credentials…", 0);
-        const tvAuthPromise = captureVuduAuthFromNetwork(page, 30_000);
+        const tvAuthPromise = captureVuduAuthFromNetwork(page, 20_000);
         await page.goto("https://athome.fandango.com/content/browse/mytv", {
           waitUntil: "domcontentloaded",
           timeout: 60_000,
         });
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(2500);
         if (/\/content\/account\/login/i.test(page.url())) {
           throw new SessionExpiredError(
             "Fandango session expired. Disconnect, Connect again (complete any email code), then Sync."
           );
         }
-        const tvAuth = (await tvAuthPromise) || (await extractVuduAuth(page));
-        auth = tvAuth ? await validateVuduAuth(tvAuth) : null;
-      }
-
-      // Cookie login can remain valid while sessionKeys are dead. The SPA stores a
-      // lightDeviceKey that can mint a fresh weakSessionKey without a full reconnect.
-      if (!auth) {
-        onProgress?.("Renewing Vudu session with saved light-device credentials…", 0);
-        const device = await extractLightDeviceFromPage(page);
         if (device?.lightDeviceKey) {
-          const renewed = await renewVuduSessionWithLightDevice(device);
+          const renewed = await renewVuduSessionInPage(page, device, (msg) =>
+            onProgress?.(msg, 0)
+          );
           auth = renewed ? await validateVuduAuth(renewed) : null;
-          if (auth) {
-            onProgress?.("Light-device renewal succeeded", 0);
-          } else {
-            onProgress?.("Light-device renewal did not yield a usable session", 0);
-          }
-        } else {
-          onProgress?.("No lightDeviceKey found in page storage", 0);
+        }
+        if (!auth) {
+          const tvAuth = (await tvAuthPromise) || (await extractVuduAuth(page));
+          auth = tvAuth ? await validateVuduAuth(tvAuth) : null;
         }
       }
 
@@ -353,7 +357,9 @@ export class FandangoProvider implements Provider {
       return null;
     }
     onProgress?.("Renewing Vudu session with light-device credentials…", 0);
-    const renewed = await renewVuduSessionWithLightDevice(device);
+    const renewed = await renewVuduSessionWithLightDevice(device, (msg) =>
+      onProgress?.(msg, 0)
+    );
     if (!renewed) {
       onProgress?.("Light-device renewal failed", 0);
       return null;

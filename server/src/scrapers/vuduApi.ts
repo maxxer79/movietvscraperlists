@@ -443,42 +443,20 @@ export async function extractLightDeviceFromPage(page: Page): Promise<VuduLightD
 /**
  * Mint a fresh weakSessionKey using the SPA's light-device binding.
  * Cookie login can stay valid while sessionKeys expire; this is how the site renews.
+ *
+ * Prefer calling from the browser context (see renewVuduSessionInPage) so Vudu
+ * cookies are included — Node fetch alone often fails without them.
  */
 export async function renewVuduSessionWithLightDevice(
-  device: VuduLightDevice
+  device: VuduLightDevice,
+  onAttempt?: (message: string) => void
 ): Promise<VuduAuth | null> {
-  const accountId = device.lightDeviceAccountId || device.accountId || device.userId;
-  const attempts: Array<{ label: string; params: Record<string, string> }> = [];
-
-  for (const claimedAppId of ["html5app", "myvudu", "vuduandroid"] as const) {
-    const base: Record<string, string> = {
-      claimedAppId,
-      format: "application/json",
-      _type: "sessionKeyRequest",
-      lightDeviceKey: device.lightDeviceKey,
-      weakSeconds: "2592000",
-    };
-    if (device.lightDeviceId) base.lightDeviceId = device.lightDeviceId;
-    if (accountId) {
-      attempts.push({
-        label: `${claimedAppId} + lightDeviceKey + accountId`,
-        params: { ...base, accountId },
-      });
-    }
-    if (device.userId) {
-      attempts.push({
-        label: `${claimedAppId} + lightDeviceKey + userId`,
-        params: { ...base, userId: device.userId },
-      });
-    }
-    attempts.push({
-      label: `${claimedAppId} + lightDeviceKey only`,
-      params: { ...base },
-    });
-  }
+  const attempts = buildLightDeviceRenewalAttempts(device);
+  const errors: string[] = [];
 
   for (const attempt of attempts) {
     try {
+      onAttempt?.(`Trying ${attempt.label}…`);
       const params = new URLSearchParams(attempt.params);
       const data = await vuduGet(params, `sessionKeyRequest/${attempt.label}`);
       const auth = extractVuduAuthFromPayload(data);
@@ -486,14 +464,171 @@ export async function renewVuduSessionWithLightDevice(
         log.info(
           `Renewed Vudu session via ${attempt.label} (userId ${auth.userId.slice(0, 6)}…)`
         );
+        onAttempt?.(`Succeeded with ${attempt.label}`);
         return auth;
       }
-      log.warn(`${attempt.label}: response had no sessionKey`);
+      const msg = `${attempt.label}: response had no sessionKey`;
+      log.warn(msg);
+      errors.push(msg);
+      onAttempt?.(msg);
     } catch (err) {
-      log.warn(`${attempt.label} failed: ${(err as Error).message}`);
+      const msg = `${attempt.label}: ${(err as Error).message}`;
+      log.warn(msg);
+      errors.push(msg);
+      onAttempt?.(msg);
+    }
+  }
+  if (errors.length) {
+    onAttempt?.(`All light-device renewals failed (${errors.length} attempts)`);
+  }
+  return null;
+}
+
+function buildLightDeviceRenewalAttempts(
+  device: VuduLightDevice
+): Array<{ label: string; params: Record<string, string> }> {
+  const accountId = device.lightDeviceAccountId || device.accountId || device.userId;
+  const attempts: Array<{ label: string; params: Record<string, string> }> = [];
+
+  // Most likely shapes first — keep the matrix small so sync logs stay readable.
+  const variants: Array<{ claimedAppId: string; type: string }> = [
+    { claimedAppId: "html5app", type: "sessionKeyRequest" },
+    { claimedAppId: "myvudu", type: "sessionKeyRequest" },
+    { claimedAppId: "html5app", type: "lightDeviceSessionKeyRequest" },
+    { claimedAppId: "vuduandroid", type: "sessionKeyRequest" },
+  ];
+
+  for (const { claimedAppId, type } of variants) {
+    const base: Record<string, string> = {
+      claimedAppId,
+      format: "application/json",
+      _type: type,
+      lightDeviceKey: device.lightDeviceKey,
+      weakSeconds: "2592000",
+      followup: "user",
+    };
+    if (device.lightDeviceId) base.lightDeviceId = device.lightDeviceId;
+
+    if (accountId && device.lightDeviceId) {
+      attempts.push({
+        label: `${claimedAppId}/${type} + device+account`,
+        params: {
+          ...base,
+          accountId,
+          lightDeviceAccountId: accountId,
+        },
+      });
+    }
+    if (accountId) {
+      attempts.push({
+        label: `${claimedAppId}/${type} + accountId`,
+        params: { ...base, accountId },
+      });
+    }
+    attempts.push({
+      label: `${claimedAppId}/${type}`,
+      params: { ...base },
+    });
+  }
+  return attempts;
+}
+
+/**
+ * Same renewal as renewVuduSessionWithLightDevice, but executed inside the page so
+ * api.vudu.com receives the browser's Vudu cookies (Node fetch does not).
+ */
+export async function renewVuduSessionInPage(
+  page: Page,
+  device: VuduLightDevice,
+  onAttempt?: (message: string) => void
+): Promise<VuduAuth | null> {
+  const attempts = buildLightDeviceRenewalAttempts(device).slice(0, 12);
+
+  for (const attempt of attempts) {
+    onAttempt?.(`In-page ${attempt.label}…`);
+    try {
+      const result = await page.evaluate(async (params) => {
+        const qs = new URLSearchParams(params).toString();
+        const url = `https://api.vudu.com/api2/?${qs}`;
+        const res = await fetch(url, {
+          credentials: "include",
+          headers: {
+            Accept: "application/json, text/javascript, */*",
+          },
+        });
+        const text = await res.text();
+        return { ok: res.ok, status: res.status, text: text.slice(0, 4000) };
+      }, attempt.params);
+
+      if (!result.ok) {
+        const msg = `${attempt.label}: HTTP ${result.status}`;
+        log.warn(msg);
+        onAttempt?.(msg);
+        continue;
+      }
+
+      let data: Record<string, unknown>;
+      try {
+        data = parseVuduJson(result.text);
+      } catch {
+        const msg = `${attempt.label}: bad JSON`;
+        onAttempt?.(msg);
+        continue;
+      }
+
+      const type = vuduStr(data, "_type");
+      if (type === "error") {
+        const code = vuduStr(data, "code") || "unknown";
+        const text = vuduStr(data, "text") || code;
+        const msg = `${attempt.label}: ${code} / ${text}`;
+        log.warn(msg);
+        onAttempt?.(msg);
+        continue;
+      }
+
+      const auth = extractVuduAuthFromPayload(data);
+      if (auth) {
+        log.info(
+          `In-page renewed Vudu session via ${attempt.label} (userId ${auth.userId.slice(0, 6)}…)`
+        );
+        onAttempt?.(`Succeeded with in-page ${attempt.label}`);
+        return auth;
+      }
+      onAttempt?.(`${attempt.label}: response had no sessionKey`);
+    } catch (err) {
+      const msg = `${attempt.label}: ${(err as Error).message}`;
+      log.warn(msg);
+      onAttempt?.(msg);
     }
   }
   return null;
+}
+
+/** Drop expired session keys so the SPA is forced to remint on next navigation. */
+export async function clearStaleVuduSessionKeys(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const decodeHoggle = (key: string): string => {
+      if (!key.startsWith("hoggle")) return key;
+      try {
+        return atob(decodeURIComponent(key.slice("hoggle".length))) || key;
+      } catch {
+        return key;
+      }
+    };
+    const dropLogical = /^(weakSessionKey|strongSessionKey|weakSessionKeyExpiration|mtv\.vudu\.weakSessionKey)$/i;
+    for (const store of [localStorage, sessionStorage]) {
+      const keys: string[] = [];
+      for (let i = 0; i < store.length; i++) {
+        const k = store.key(i);
+        if (k) keys.push(k);
+      }
+      for (const key of keys) {
+        if (dropLogical.test(decodeHoggle(key)) || dropLogical.test(key)) {
+          store.removeItem(key);
+        }
+      }
+    }
+  });
 }
 
 /**
