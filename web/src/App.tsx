@@ -235,7 +235,17 @@ export function App() {
       return;
     }
     try {
-      await api.deleteMergedItem(item.id);
+      const result = await api.deleteMergedItem(item.id);
+      if (result.failed && result.failed.length > 0) {
+        const n = Array.isArray(result.failed) ? result.failed.length : 0;
+        toast(
+          result.ok === false && (!result.deleted || (result.deleted as unknown[]).length === 0)
+            ? `Could not remove “${item.title}”`
+            : `Removed “${item.title}” from some retailers; ${n} failed — refresh to see what's left`
+        );
+        await refresh();
+        return;
+      }
       toast(`Removed “${item.title}”`);
       await refresh();
       setLibraryTab("removed");
