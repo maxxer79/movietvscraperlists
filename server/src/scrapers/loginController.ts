@@ -27,6 +27,12 @@ interface ActiveLogin {
   createdAt: number;
   /** Kept only for the duration of this login so we can mint a Vudu API sessionKey. */
   creds?: LoginCredentials;
+  /**
+   * Live capture of api.vudu.com traffic during Sign-In / code verify.
+   * Classic password sessionKeyRequest often returns empty now; the SPA still
+   * mints a usable key on the wire during browser login.
+   */
+  networkAuthPromise?: Promise<VuduAuth | null>;
 }
 
 const active = new Map<string, ActiveLogin>();
@@ -60,10 +66,30 @@ interface AuthCaptureResult {
   detail?: string;
 }
 
+async function acceptValidatedAuth(
+  page: Page,
+  providerId: string,
+  auth: VuduAuth,
+  source: string
+): Promise<VuduAuth | null> {
+  const ok = await validateVuduAuth(auth);
+  if (!ok) {
+    log.warn(`${source} sessionKey failed API validation`);
+    return null;
+  }
+  await injectVuduAuthIntoLocalStorage(page, ok).catch((err) => {
+    log.warn("Could not inject auth into page localStorage", err);
+  });
+  log.info(
+    `Got Vudu API credentials via ${source} for ${providerId} (userId ${ok.userId.slice(0, 6)}…)`
+  );
+  return ok;
+}
+
 /**
- * After a successful browser login, mint a fresh Vudu API sessionKey via
- * password sessionKeyRequest. Page/localStorage tokens are often already dead —
- * never persist them unless they pass API validation.
+ * After a successful browser login, obtain a usable Vudu API sessionKey.
+ * Prefer keys captured live from Sign-In network traffic; fall back to password
+ * mint and validated page storage. Never persist rejected tokens.
  */
 async function captureProviderAuth(login: ActiveLogin): Promise<AuthCaptureResult> {
   if (login.provider.id !== "fandango") return { auth: null };
@@ -71,66 +97,66 @@ async function captureProviderAuth(login: ActiveLogin): Promise<AuthCaptureResul
   try {
     const page = login.page;
 
-    if (!login.creds?.username || !login.creds?.password) {
-      return {
-        auth: null,
-        detail: "Password was not available to mint a Vudu API sessionKey.",
-      };
-    }
-
-    const minted = await mintVuduSessionWithPassword(
-      login.creds.username,
-      login.creds.password,
-      (msg) => attempts.push(msg)
-    );
-    if (minted) {
-      const ok = await validateVuduAuth(minted);
-      if (ok) {
-        await injectVuduAuthIntoLocalStorage(page, ok).catch((err) => {
-          log.warn("Could not inject minted auth into page localStorage", err);
-        });
-        log.info(
-          `Minted Vudu API credentials for ${login.provider.id} (userId ${ok.userId.slice(0, 6)}…)`
-        );
-        return { auth: ok };
+    // 1) Auth minted by the SPA during Sign-In / email-code (best path).
+    if (login.networkAuthPromise) {
+      attempts.push("Checking Sign-In network capture…");
+      const fromLogin = await login.networkAuthPromise;
+      if (fromLogin) {
+        const ok = await acceptValidatedAuth(page, login.provider.id, fromLogin, "Sign-In network");
+        if (ok) return { auth: ok };
+        attempts.push("Sign-In network key failed API validation");
+      } else {
+        attempts.push("No sessionKey seen on the wire during Sign-In");
       }
-      attempts.push("Password mint returned a sessionKey that failed API validation");
-      log.warn("Password-minted Vudu session failed validation");
-    } else {
-      log.warn("Password sessionKeyRequest failed");
     }
 
-    // Last resort: only keep page/network tokens if they actually work against the API.
-    const networkAuthPromise = captureVuduAuthFromNetwork(page, 20_000);
+    // 2) Classic password sessionKeyRequest (often empty under Fandango SSO).
+    if (login.creds?.username && login.creds?.password) {
+      const minted = await mintVuduSessionWithPassword(
+        login.creds.username,
+        login.creds.password,
+        (msg) => attempts.push(msg)
+      );
+      if (minted) {
+        const ok = await acceptValidatedAuth(page, login.provider.id, minted, "password mint");
+        if (ok) return { auth: ok };
+        attempts.push("Password mint returned a sessionKey that failed API validation");
+      } else {
+        log.warn("Password sessionKeyRequest failed");
+      }
+    } else {
+      attempts.push("Password was not available for API mint");
+    }
+
+    // 3) Brief post-login listen + page storage (only if API-validated).
+    const networkAuthPromise = captureVuduAuthFromNetwork(page, 25_000);
     await page.goto("https://athome.fandango.com/content/browse/mymovies", {
       waitUntil: "domcontentloaded",
       timeout: 60_000,
     });
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(2500);
     await dismissCookieBanner(page);
+    await page.evaluate(() => window.scrollBy(0, 600)).catch(() => {});
 
-    let auth = await extractVuduAuth(page);
-    if (!auth) {
-      auth = (await extractVuduAuth(page)) || (await networkAuthPromise);
+    const fromNetwork = await networkAuthPromise;
+    if (fromNetwork) {
+      const ok = await acceptValidatedAuth(page, login.provider.id, fromNetwork, "library network");
+      if (ok) return { auth: ok };
+      attempts.push("Library-page network key failed API validation");
     }
-    if (auth) {
-      const ok = await validateVuduAuth(auth);
-      if (ok) {
-        await injectVuduAuthIntoLocalStorage(page, ok).catch(() => {});
-        log.info(
-          `Captured validated Vudu API credentials for ${login.provider.id} (userId ${ok.userId.slice(0, 6)}…)`
-        );
-        return { auth: ok };
-      }
+
+    const fromPage = await extractVuduAuth(page);
+    if (fromPage) {
+      const ok = await acceptValidatedAuth(page, login.provider.id, fromPage, "page storage");
+      if (ok) return { auth: ok };
       attempts.push("Page/localStorage tokens were present but rejected by the API");
-      log.warn("Page-captured Vudu tokens failed validation — not saving them");
     } else {
-      attempts.push("No sessionKey found in page storage or network traffic");
+      attempts.push("No sessionKey found in page storage");
     }
 
     return {
       auth: null,
-      detail: attempts.slice(-4).join(" · ") || "Could not mint a usable Vudu API sessionKey",
+      detail: attempts.slice(-5).join(" · ") || "Could not mint a usable Vudu API sessionKey",
     };
   } catch (err) {
     log.warn(`Could not capture Vudu auth after login for ${login.provider.id}`, err);
@@ -141,6 +167,7 @@ async function captureProviderAuth(login: ActiveLogin): Promise<AuthCaptureResul
   } finally {
     // Do not keep the password around after finalize.
     login.creds = undefined;
+    login.networkAuthPromise = undefined;
   }
 }
 
@@ -193,6 +220,10 @@ export async function startLogin(
   };
 
   try {
+    // Listen for a live sessionKey while the SPA signs in (password mint often fails).
+    if (provider.id === "fandango") {
+      login.networkAuthPromise = captureVuduAuthFromNetwork(page, 120_000);
+    }
     const step = await provider.startLogin(page, creds);
     if (step.status === "error") {
       await saveScreenshot(page, provider.id, "login-error");
@@ -229,6 +260,10 @@ export async function submitInput(
     };
   }
   try {
+    // Code verify also mints API keys — refresh the network listener.
+    if (login.provider.id === "fandango") {
+      login.networkAuthPromise = captureVuduAuthFromNetwork(login.page, 90_000);
+    }
     const step = await login.provider.submitInput(login.page, field, value);
     if (step.status === "success") {
       return await finalize(login);

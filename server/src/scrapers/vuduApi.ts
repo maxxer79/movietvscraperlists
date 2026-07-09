@@ -451,6 +451,7 @@ export async function mintVuduSessionWithPassword(
   onAttempt?: (message: string) => void
 ): Promise<VuduAuth | null> {
   // Classic Vudu clients use GET with query params (POST without a query string is rejected).
+  // Under Fandango SSO this often returns an empty/challenge payload with no sessionKey.
   const attempts: Array<{ claimedAppId: string; label: string }> = [
     { claimedAppId: "myvudu", label: "myvudu + password" },
     { claimedAppId: "html5app", label: "html5app + password" },
@@ -478,7 +479,11 @@ export async function mintVuduSessionWithPassword(
         onAttempt?.(`Succeeded with ${attempt.label}`);
         return auth;
       }
-      onAttempt?.(`${attempt.label}: response had no sessionKey`);
+      const type = vuduStr(data, "_type") || "unknown";
+      const keys = Object.keys(data).slice(0, 12).join(",");
+      const detail = `${attempt.label}: response had no sessionKey (_type=${type}, keys=${keys || "none"})`;
+      log.warn(detail);
+      onAttempt?.(detail);
     } catch (err) {
       const msg = `${attempt.label}: ${(err as Error).message}`;
       log.warn(msg);

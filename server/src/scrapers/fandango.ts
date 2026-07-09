@@ -57,7 +57,7 @@ export class FandangoProvider implements Provider {
     "https://athome.fandango.com/content/account/login?type=vudu_auth";
   readonly libraryUrl = "https://athome.fandango.com/content/browse/mymovies";
   readonly notes =
-    "Formerly Vudu. Connect must mint a fresh API sessionKey before Sync works. Do not Sync on an old connection — Disconnect, Connect (complete any email code), then Sync.";
+    "Formerly Vudu. Connect captures a live API sessionKey during Sign-In (needed for Sync). If Connect fails to mint a key, try again; Sync will not work without it.";
 
   // Your purchased library lives on two dedicated pages. We scrape ONLY these,
   // so wishlist and other lists are ignored.
