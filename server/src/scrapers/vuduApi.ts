@@ -8,6 +8,9 @@ const API_BASE = "https://api.vudu.com/api2/";
 export interface VuduAuth {
   sessionKey: string;
   userId: string;
+  /** Optional alternate session key if weakSessionKey fails. */
+  strongSessionKey?: string;
+  accountId?: string;
 }
 
 /** Vudu wraps every scalar in a single-element array: { title: ["Matrix"] } */
@@ -40,29 +43,42 @@ function decodeHoggleKey(key: string): string {
 function considerAuthEntry(
   key: string,
   val: string,
-  out: { sessionKey?: string; userId?: string }
+  out: {
+    sessionKey?: string;
+    strongSessionKey?: string;
+    userId?: string;
+    accountId?: string;
+  }
 ): void {
   if (!val || !val.trim()) return;
 
   const logical = decodeHoggleKey(key);
-
-  // Prefer weakSessionKey; also accept sessionKey / weakSession variants.
-  if (/weakSessionKey$/i.test(logical) && val) out.sessionKey = val;
-  else if (
-    !out.sessionKey &&
-    /^(strong)?[Ss]essionKey$/i.test(logical) &&
-    !/csrf/i.test(logical) &&
-    val.length > 8
-  ) {
-    out.sessionKey = val;
+  // Values are sometimes URI-encoded.
+  let value = val;
+  try {
+    if (/%[0-9A-Fa-f]{2}/.test(val)) value = decodeURIComponent(val);
+  } catch {
+    value = val;
   }
 
-  if (/^(userID|userId|accountId)$/i.test(logical) && val) out.userId = val;
-  else if (!out.userId && /^user[_-]?id$/i.test(logical) && /^\d+$/.test(val)) out.userId = val;
+  if (/^weakSessionKey$/i.test(logical) && value) out.sessionKey = value;
+  else if (/^strongSessionKey$/i.test(logical) && value) out.strongSessionKey = value;
+  else if (
+    !out.sessionKey &&
+    /^sessionKey$/i.test(logical) &&
+    !/csrf/i.test(logical) &&
+    value.length > 8
+  ) {
+    out.sessionKey = value;
+  }
 
-  if ((!out.sessionKey || !out.userId) && val.trim().startsWith("{")) {
+  if (/^(userID|userId)$/i.test(logical) && value) out.userId = value;
+  else if (/^accountId$/i.test(logical) && value) out.accountId = value;
+  else if (!out.userId && /^user[_-]?id$/i.test(logical) && /^\d+$/.test(value)) out.userId = value;
+
+  if ((!out.sessionKey || !out.userId) && value.trim().startsWith("{")) {
     try {
-      const obj = JSON.parse(val) as Record<string, unknown>;
+      const obj = JSON.parse(value) as Record<string, unknown>;
       walkObjectForAuth(obj, out, 0);
     } catch {
       /* not JSON */
@@ -72,7 +88,12 @@ function considerAuthEntry(
 
 function walkObjectForAuth(
   obj: Record<string, unknown>,
-  out: { sessionKey?: string; userId?: string },
+  out: {
+    sessionKey?: string;
+    strongSessionKey?: string;
+    userId?: string;
+    accountId?: string;
+  },
   depth: number
 ): void {
   if (depth > 4) return;
@@ -86,9 +107,21 @@ function walkObjectForAuth(
   }
 }
 
-function finalizeAuth(out: { sessionKey?: string; userId?: string }): VuduAuth | null {
-  if (!out.sessionKey || !out.userId) return null;
-  return { sessionKey: out.sessionKey, userId: out.userId };
+function finalizeAuth(out: {
+  sessionKey?: string;
+  strongSessionKey?: string;
+  userId?: string;
+  accountId?: string;
+}): VuduAuth | null {
+  const sessionKey = out.sessionKey || out.strongSessionKey;
+  const userId = out.userId || out.accountId;
+  if (!sessionKey || !userId) return null;
+  return {
+    sessionKey,
+    userId,
+    strongSessionKey: out.strongSessionKey,
+    accountId: out.accountId,
+  };
 }
 
 /** Read weakSessionKey + userId from a saved Playwright storageState JSON (no browser). */
@@ -98,17 +131,27 @@ export function extractVuduAuthFromStorageState(storageStateJson: string): VuduA
       origins?: Array<{ localStorage?: Array<{ name: string; value: string }> }>;
       cookies?: Array<{ name: string; value: string }>;
     };
-    const out: { sessionKey?: string; userId?: string } = {};
+    const out: {
+      sessionKey?: string;
+      strongSessionKey?: string;
+      userId?: string;
+      accountId?: string;
+    } = {};
     for (const origin of state.origins ?? []) {
       for (const entry of origin.localStorage ?? []) {
         considerAuthEntry(entry.name, entry.value, out);
       }
     }
-    // Some builds stash tokens in cookies too.
     for (const cookie of state.cookies ?? []) {
       considerAuthEntry(cookie.name, cookie.value, out);
     }
-    return finalizeAuth(out);
+    const auth = finalizeAuth(out);
+    if (auth) {
+      log.info(
+        `Extracted Vudu auth from storageState (userId ${auth.userId.slice(0, 6)}…, hasStrong=${Boolean(auth.strongSessionKey)})`
+      );
+    }
+    return auth;
   } catch {
     return null;
   }
@@ -120,13 +163,17 @@ export function extractVuduAuthFromStorageState(storageStateJson: string): VuduA
  */
 export async function extractVuduAuth(page: Page): Promise<VuduAuth | null> {
   const auth = await page.evaluate(() => {
-    const out: { sessionKey?: string; userId?: string } = {};
+    const out: {
+      sessionKey?: string;
+      strongSessionKey?: string;
+      userId?: string;
+      accountId?: string;
+    } = {};
 
     const decodeHoggle = (key: string): string => {
       if (!key.startsWith("hoggle")) return key;
       try {
         const b64 = decodeURIComponent(key.slice("hoggle".length));
-        // atob is available in the browser context
         return atob(b64) || key;
       } catch {
         return key;
@@ -136,20 +183,30 @@ export async function extractVuduAuth(page: Page): Promise<VuduAuth | null> {
     const consider = (key: string, val: string) => {
       if (!val) return;
       const logical = decodeHoggle(key);
+      let value = val;
+      try {
+        if (/%[0-9A-Fa-f]{2}/.test(val)) value = decodeURIComponent(val);
+      } catch {
+        value = val;
+      }
 
-      if (/weakSessionKey$/i.test(logical)) out.sessionKey = val;
+      if (/^weakSessionKey$/i.test(logical)) out.sessionKey = value;
+      else if (/^strongSessionKey$/i.test(logical)) out.strongSessionKey = value;
       else if (
         !out.sessionKey &&
-        /^(strong)?[Ss]essionKey$/i.test(logical) &&
+        /^sessionKey$/i.test(logical) &&
         !/csrf/i.test(logical) &&
-        val.length > 8
+        value.length > 8
       ) {
-        out.sessionKey = val;
+        out.sessionKey = value;
       }
-      if (/^(userID|userId|accountId)$/i.test(logical)) out.userId = val;
-      else if (!out.userId && /^user[_-]?id$/i.test(logical) && /^\d+$/.test(val)) out.userId = val;
+      if (/^(userID|userId)$/i.test(logical)) out.userId = value;
+      else if (/^accountId$/i.test(logical)) out.accountId = value;
+      else if (!out.userId && /^user[_-]?id$/i.test(logical) && /^\d+$/.test(value)) {
+        out.userId = value;
+      }
 
-      if ((!out.sessionKey || !out.userId) && val.trim().startsWith("{")) {
+      if ((!out.sessionKey || !out.userId) && value.trim().startsWith("{")) {
         try {
           const walk = (obj: Record<string, unknown>, depth: number) => {
             if (depth > 4) return;
@@ -161,7 +218,7 @@ export async function extractVuduAuth(page: Page): Promise<VuduAuth | null> {
               }
             }
           };
-          walk(JSON.parse(val) as Record<string, unknown>, 0);
+          walk(JSON.parse(value) as Record<string, unknown>, 0);
         } catch {
           /* ignore */
         }
@@ -299,6 +356,7 @@ interface FetchLibraryOpts {
   superType: "movies" | "tv";
   listType?: string;
   claimedAppId?: string;
+  sessionKeyOverride?: string;
   onPage?: (info: { superType: string; page: number; batchSize: number; total: number }) => void;
 }
 
@@ -307,13 +365,15 @@ function assertVuduOk(data: Record<string, unknown>, context: string): void {
   if (type !== "error") return;
 
   const code = vuduStr(data, "code") || "unknown";
+  const subCode = vuduStr(data, "subCode");
   const text = vuduStr(data, "text") || code;
+  const detail = [code, subCode, text].filter(Boolean).join(" / ");
   if (code === "authenticationExpired" || code === "accessDenied") {
     throw new SessionExpiredError(
       "Fandango session expired. Please disconnect and log in again."
     );
   }
-  throw new Error(`Vudu API error (${context}): ${text}`);
+  throw new Error(`Vudu API error (${context}): ${detail}`);
 }
 
 function parseContentRow(row: Record<string, unknown>): VuduContentItem | null {
@@ -339,11 +399,35 @@ async function vuduGet(
   context: string
 ): Promise<Record<string, unknown>> {
   const url = `${API_BASE}?${params.toString()}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
-  if (!res.ok) {
-    throw new Error(`Vudu API HTTP ${res.status} for ${context}`);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      signal: AbortSignal.timeout(60_000),
+      headers: {
+        Accept: "application/json, text/javascript, */*",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        Referer: "https://athome.fandango.com/",
+        Origin: "https://athome.fandango.com",
+      },
+    });
+  } catch (err) {
+    throw new Error(`Vudu API network failure (${context}): ${(err as Error).message}`);
   }
-  const data = parseVuduJson(await res.text());
+  const body = await res.text();
+  if (!res.ok) {
+    throw new Error(
+      `Vudu API HTTP ${res.status} for ${context}: ${body.slice(0, 200).replace(/\s+/g, " ")}`
+    );
+  }
+  let data: Record<string, unknown>;
+  try {
+    data = parseVuduJson(body);
+  } catch (err) {
+    throw new Error(
+      `Vudu API bad JSON (${context}): ${(err as Error).message}; body=${body.slice(0, 120)}`
+    );
+  }
   assertVuduOk(data, context);
   return data;
 }
@@ -355,6 +439,7 @@ export async function fetchVuduLibrary(
 ): Promise<VuduContentItem[]> {
   const listType = opts.listType ?? "rentedOrOwned";
   const claimedAppId = opts.claimedAppId ?? "html5app";
+  const sessionKey = opts.sessionKeyOverride ?? auth.sessionKey;
   const out: VuduContentItem[] = [];
   let offset = 0;
   let pages = 0;
@@ -369,7 +454,7 @@ export async function fetchVuduLibrary(
     params.append("followup", "ratingsSummaries");
     params.append("followup", "totalCount");
     params.set("listType", listType);
-    params.set("sessionKey", auth.sessionKey);
+    params.set("sessionKey", sessionKey);
     params.set("sortBy", "title");
     params.set("superType", opts.superType);
     params.set("userId", auth.userId);
@@ -382,7 +467,10 @@ export async function fetchVuduLibrary(
       params.append("type", "series");
     }
 
-    const data = await vuduGet(params, `${opts.superType} offset ${offset}`);
+    const data = await vuduGet(
+      params,
+      `${opts.superType}/${claimedAppId} offset ${offset}`
+    );
     const batch = (data.content as Record<string, unknown>[] | undefined) ?? [];
     for (const row of batch) {
       const item = parseContentRow(row);
@@ -391,7 +479,12 @@ export async function fetchVuduLibrary(
 
     const moreBelow = vuduStr(data, "moreBelow");
     pages++;
-    opts.onPage?.({ superType: opts.superType, page: pages, batchSize: batch.length, total: out.length });
+    opts.onPage?.({
+      superType: opts.superType,
+      page: pages,
+      batchSize: batch.length,
+      total: out.length,
+    });
     log.info(
       `${opts.superType} page ${pages}: +${batch.length} (total ${out.length}), moreBelow=${moreBelow}`
     );
@@ -400,6 +493,55 @@ export async function fetchVuduLibrary(
   }
 
   return out;
+}
+
+/**
+ * Try several claimedAppId / sessionKey combinations until one works.
+ * Logs each failure so the UI sync log shows the real API error.
+ */
+export async function fetchVuduLibraryWithFallback(
+  auth: VuduAuth,
+  opts: Omit<FetchLibraryOpts, "claimedAppId" | "sessionKeyOverride">,
+  onAttempt?: (message: string) => void
+): Promise<VuduContentItem[]> {
+  const attempts: Array<{ claimedAppId: string; sessionKey: string; label: string }> = [
+    { claimedAppId: "html5app", sessionKey: auth.sessionKey, label: "html5app + weakSessionKey" },
+    { claimedAppId: "myvudu", sessionKey: auth.sessionKey, label: "myvudu + weakSessionKey" },
+    { claimedAppId: "vuduandroid", sessionKey: auth.sessionKey, label: "vuduandroid + weakSessionKey" },
+  ];
+  if (auth.strongSessionKey && auth.strongSessionKey !== auth.sessionKey) {
+    attempts.push(
+      {
+        claimedAppId: "html5app",
+        sessionKey: auth.strongSessionKey,
+        label: "html5app + strongSessionKey",
+      },
+      {
+        claimedAppId: "myvudu",
+        sessionKey: auth.strongSessionKey,
+        label: "myvudu + strongSessionKey",
+      }
+    );
+  }
+
+  let lastErr: Error | null = null;
+  for (const attempt of attempts) {
+    try {
+      onAttempt?.(`Trying ${attempt.label}…`);
+      const rows = await fetchVuduLibrary(auth, {
+        ...opts,
+        claimedAppId: attempt.claimedAppId,
+        sessionKeyOverride: attempt.sessionKey,
+      });
+      onAttempt?.(`Succeeded with ${attempt.label}`);
+      return rows;
+    } catch (err) {
+      lastErr = err as Error;
+      log.warn(`${attempt.label} failed: ${lastErr.message}`);
+      onAttempt?.(`${attempt.label} failed: ${lastErr.message}`);
+    }
+  }
+  throw lastErr ?? new Error("All Vudu API auth variants failed");
 }
 
 /** Individual movies/shows inside a bundle/collection (containerId lookup). */

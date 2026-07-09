@@ -1,6 +1,12 @@
 {
+<<<<<<< HEAD
   "version": "0.1.10",
   "build": 27,
   "releasedAt": "2026-07-09T01:12:29.304Z",
+=======
+  "version": "0.1.11",
+  "build": 27,
+  "releasedAt": "2026-07-09T01:23:26.046Z",
+>>>>>>> daaa9f2 (fix(fandango): surface Vudu API errors and try alternate app/session keys)
   "codename": "Foundation"
 }

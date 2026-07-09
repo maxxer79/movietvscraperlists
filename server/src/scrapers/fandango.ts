@@ -24,11 +24,12 @@ import {
   extractVuduAuth,
   extractVuduAuthFromStorageState,
   fetchBundleContents,
-  fetchVuduLibrary,
+  fetchVuduLibraryWithFallback,
   injectVuduAuthIntoLocalStorage,
   isBundleItem,
   releaseYear,
   vuduDetailUrl,
+  type VuduAuth,
 } from "./vuduApi.js";
 import { saveSession } from "../services/sessionStore.js";
 
@@ -276,7 +277,7 @@ export class FandangoProvider implements Provider {
 
   /** Paginated api.vudu.com contentSearch — reliable for 1000+ titles. listType rentedOrOwned excludes wishlist. */
   private async scrapeViaApi(
-    auth: { sessionKey: string; userId: string },
+    auth: VuduAuth,
     onProgress?: (message: string, itemsFound?: number) => void
   ): Promise<MediaItem[]> {
     const media: MediaItem[] = [];
@@ -287,22 +288,20 @@ export class FandangoProvider implements Provider {
       { superType: "tv" as const, type: "tv" as const },
     ]) {
       onProgress?.(`Fetching ${spec.type} from Vudu API…`, media.length);
-      const fetchOpts = {
-        superType: spec.superType,
-        listType: "rentedOrOwned" as const,
-        claimedAppId: "html5app" as const,
-        onPage: (info: { superType: string; page: number; batchSize: number; total: number }) => {
-          onProgress?.(
-            `Fetching ${info.superType}: page ${info.page} (+${info.batchSize}, ${info.total} so far)`,
-            media.length + info.total
-          );
+      const rows = await fetchVuduLibraryWithFallback(
+        auth,
+        {
+          superType: spec.superType,
+          listType: "rentedOrOwned",
+          onPage: (info) => {
+            onProgress?.(
+              `Fetching ${info.superType}: page ${info.page} (+${info.batchSize}, ${info.total} so far)`,
+              media.length + info.total
+            );
+          },
         },
-      };
-      let rows = await fetchVuduLibrary(auth, fetchOpts).catch(async (err) => {
-        log.warn(`html5app failed for ${spec.superType}, retrying myvudu`, err);
-        onProgress?.(`Retrying ${spec.type} with alternate API…`, media.length);
-        return fetchVuduLibrary(auth, { ...fetchOpts, claimedAppId: "myvudu" });
-      });
+        (msg) => onProgress?.(msg, media.length)
+      );
 
       for (const row of rows) {
         const key = `${spec.type}:${row.contentId}`;
