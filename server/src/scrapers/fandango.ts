@@ -23,10 +23,12 @@ import {
   extractVuduAuthFromStorageState,
   fetchBundleContents,
   fetchVuduLibrary,
+  injectVuduAuthIntoLocalStorage,
   isBundleItem,
   releaseYear,
   vuduDetailUrl,
 } from "./vuduApi.js";
+import { saveSession } from "../services/sessionStore.js";
 
 const log = createLogger("fandango");
 
@@ -49,7 +51,8 @@ export class FandangoProvider implements Provider {
   readonly loginUrl =
     "https://athome.fandango.com/content/account/login?type=vudu_auth";
   readonly libraryUrl = "https://athome.fandango.com/content/browse/mymovies";
-  readonly notes = "Formerly Vudu. May send an email verification code on new devices.";
+  readonly notes =
+    "Formerly Vudu. May send an email verification code on new devices. After connecting, Sync uses the Vudu API (fast). If sync says credentials are missing, Disconnect and Connect again.";
 
   // Your purchased library lives on two dedicated pages. We scrape ONLY these,
   // so wishlist and other lists are ignored.
@@ -179,28 +182,53 @@ export class FandangoProvider implements Provider {
     return sel !== null;
   }
 
-  async scrapeLibrary(context: BrowserContext): Promise<MediaItem[]> {
+  async scrapeLibrary(
+    context: BrowserContext,
+    onProgress?: (message: string, itemsFound?: number) => void
+  ): Promise<MediaItem[]> {
     const page = await context.newPage();
     try {
-      // Load the site so session cookies + localStorage are available.
+      onProgress?.("Opening Fandango in browser to read session…", 0);
       await page.goto("https://athome.fandango.com/content/browse/mymovies", {
         waitUntil: "domcontentloaded",
+        timeout: 60_000,
       });
-      await page.waitForTimeout(2500);
+      await page.waitForTimeout(3000);
       await dismissCookieBanner(page);
 
       if (/\/content\/account\/login/i.test(page.url())) {
         throw new SessionExpiredError();
       }
 
-      const auth = await extractVuduAuth(page);
-      if (auth) {
-        log.info(`Using Vudu API via browser (userId ${auth.userId.slice(0, 6)}…)`);
-        return this.scrapeViaApi(auth);
+      let auth = await extractVuduAuth(page);
+      if (!auth) {
+        onProgress?.("Waiting for Vudu session tokens…", 0);
+        await page.waitForTimeout(4000);
+        auth = await extractVuduAuth(page);
       }
 
-      log.warn("No Vudu session in localStorage — falling back to DOM scroll scrape");
-      return this.scrapeViaDom(page);
+      if (auth) {
+        // Persist into localStorage so the next sync can skip the browser.
+        await injectVuduAuthIntoLocalStorage(page, auth);
+        try {
+          const storageState = JSON.stringify(await context.storageState());
+          saveSession(this.id, storageState);
+          onProgress?.("Saved API credentials for next sync", 0);
+        } catch (err) {
+          log.warn("Could not re-save session with Vudu credentials", err);
+        }
+
+        log.info(`Using Vudu API via browser (userId ${auth.userId.slice(0, 6)}…)`);
+        onProgress?.("Using fast API sync (credentials found in browser)…", 0);
+        return this.scrapeViaApi(auth, onProgress);
+      }
+
+      log.warn("No Vudu session in page storage — falling back to DOM scroll scrape");
+      onProgress?.(
+        "No API credentials found — scrolling library pages (very slow for 1000+ titles)…",
+        0
+      );
+      return this.scrapeViaDom(page, onProgress);
     } finally {
       await page.close().catch(() => {});
     }
@@ -330,17 +358,23 @@ export class FandangoProvider implements Provider {
   }
 
   /** DOM fallback when API auth isn't available (virtualized grid — may miss titles). */
-  private async scrapeViaDom(page: Page): Promise<MediaItem[]> {
+  private async scrapeViaDom(
+    page: Page,
+    onProgress?: (message: string, itemsFound?: number) => void
+  ): Promise<MediaItem[]> {
     const seen = new Set<string>();
     const media: MediaItem[] = [];
     for (const source of this.sources) {
+      onProgress?.(`Scrolling ${source.type} library page…`, media.length);
       await page.goto(source.url, { waitUntil: "domcontentloaded" });
       await page.waitForTimeout(2500);
       await dismissCookieBanner(page);
       if (/\/content\/account\/login/i.test(page.url())) {
         throw new SessionExpiredError();
       }
-      const raws = await this.collectWhileScrolling(page, source.type);
+      const raws = await this.collectWhileScrolling(page, source.type, (n) => {
+        onProgress?.(`Scrolling ${source.type}: ${n} tiles so far…`, media.length + n);
+      });
       await dumpDebug(page, this.id, source.type);
       for (const raw of raws) {
         const title = (raw.title || "").trim();
@@ -358,6 +392,7 @@ export class FandangoProvider implements Provider {
           url: raw.href,
         });
       }
+      onProgress?.(`Finished ${source.type} scroll: ${raws.length} tiles`, media.length);
     }
     return media;
   }
@@ -370,7 +405,8 @@ export class FandangoProvider implements Provider {
    */
   private async collectWhileScrolling(
     page: Page,
-    sourceType: string
+    sourceType: string,
+    onCount?: (n: number) => void
   ): Promise<Array<Record<string, string | undefined>>> {
     const collected = new Map<string, Record<string, string | undefined>>();
     let stable = 0;
@@ -405,9 +441,11 @@ export class FandangoProvider implements Provider {
       else stable = 0;
       if (i % 15 === 0) {
         log.info(`Fandango ${sourceType}: collected ${collected.size} tiles so far…`);
+        onCount?.(collected.size);
       }
     }
     log.info(`Fandango ${sourceType}: finished with ${collected.size} tiles`);
+    onCount?.(collected.size);
     return [...collected.values()];
   }
 

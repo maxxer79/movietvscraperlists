@@ -32,18 +32,40 @@ function considerAuthEntry(
   val: string,
   out: { sessionKey?: string; userId?: string }
 ): void {
+  if (!val || !val.trim()) return;
+
+  // Prefer weakSessionKey; also accept sessionKey / weakSession variants.
   if (/weakSessionKey$/i.test(key) && val) out.sessionKey = val;
+  else if (!out.sessionKey && /sessionKey$/i.test(key) && !/csrf/i.test(key) && val.length > 8) {
+    out.sessionKey = val;
+  }
+
   if (/userID$/i.test(key) && val) out.userId = val;
-  if (/userId$/i.test(key) && val) out.userId = val;
+  else if (/userId$/i.test(key) && val) out.userId = val;
+  else if (!out.userId && /^user[_-]?id$/i.test(key) && /^\d+$/.test(val)) out.userId = val;
 
   if ((!out.sessionKey || !out.userId) && val.trim().startsWith("{")) {
     try {
       const obj = JSON.parse(val) as Record<string, unknown>;
-      for (const [k, v] of Object.entries(obj)) {
-        if (typeof v === "string") considerAuthEntry(k, v, out);
-      }
+      walkObjectForAuth(obj, out, 0);
     } catch {
       /* not JSON */
+    }
+  }
+}
+
+function walkObjectForAuth(
+  obj: Record<string, unknown>,
+  out: { sessionKey?: string; userId?: string },
+  depth: number
+): void {
+  if (depth > 4) return;
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === "string") considerAuthEntry(k, v, out);
+    else if (Array.isArray(v) && v.length > 0 && typeof v[0] === "string") {
+      considerAuthEntry(k, v[0], out);
+    } else if (v && typeof v === "object" && !Array.isArray(v)) {
+      walkObjectForAuth(v as Record<string, unknown>, out, depth + 1);
     }
   }
 }
@@ -58,6 +80,7 @@ export function extractVuduAuthFromStorageState(storageStateJson: string): VuduA
   try {
     const state = JSON.parse(storageStateJson) as {
       origins?: Array<{ localStorage?: Array<{ name: string; value: string }> }>;
+      cookies?: Array<{ name: string; value: string }>;
     };
     const out: { sessionKey?: string; userId?: string } = {};
     for (const origin of state.origins ?? []) {
@@ -65,45 +88,80 @@ export function extractVuduAuthFromStorageState(storageStateJson: string): VuduA
         considerAuthEntry(entry.name, entry.value, out);
       }
     }
+    // Some builds stash tokens in cookies too.
+    for (const cookie of state.cookies ?? []) {
+      considerAuthEntry(cookie.name, cookie.value, out);
+    }
     return finalizeAuth(out);
   } catch {
     return null;
   }
 }
 
-/** Read weakSessionKey + userId from the logged-in web app's localStorage. */
+/**
+ * Read sessionKey + userId from the live page.
+ * Checks localStorage AND sessionStorage (Playwright storageState only persists localStorage).
+ */
 export async function extractVuduAuth(page: Page): Promise<VuduAuth | null> {
   const auth = await page.evaluate(() => {
-    let sessionKey: string | undefined;
-    let userId: string | undefined;
+    const out: { sessionKey?: string; userId?: string } = {};
 
     const consider = (key: string, val: string) => {
-      if (/weakSessionKey$/i.test(key) && val) sessionKey = val;
-      if (/userID$/i.test(key) && val) userId = val;
-      if (/userId$/i.test(key) && val) userId = val;
-    };
+      if (!val) return;
+      if (/weakSessionKey$/i.test(key)) out.sessionKey = val;
+      else if (!out.sessionKey && /sessionKey$/i.test(key) && !/csrf/i.test(key) && val.length > 8) {
+        out.sessionKey = val;
+      }
+      if (/userID$/i.test(key) || /userId$/i.test(key)) out.userId = val;
+      else if (!out.userId && /^user[_-]?id$/i.test(key) && /^\d+$/.test(val)) out.userId = val;
 
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key) continue;
-      const val = localStorage.getItem(key) || "";
-      consider(key, val);
-
-      if ((!sessionKey || !userId) && val.trim().startsWith("{")) {
+      if ((!out.sessionKey || !out.userId) && val.trim().startsWith("{")) {
         try {
-          const obj = JSON.parse(val) as Record<string, unknown>;
-          for (const [k, v] of Object.entries(obj)) {
-            if (typeof v === "string") consider(k, v);
-          }
+          const walk = (obj: Record<string, unknown>, depth: number) => {
+            if (depth > 4) return;
+            for (const [k, v] of Object.entries(obj)) {
+              if (typeof v === "string") consider(k, v);
+              else if (Array.isArray(v) && typeof v[0] === "string") consider(k, v[0]);
+              else if (v && typeof v === "object" && !Array.isArray(v)) {
+                walk(v as Record<string, unknown>, depth + 1);
+              }
+            }
+          };
+          walk(JSON.parse(val) as Record<string, unknown>, 0);
         } catch {
-          /* not JSON */
+          /* ignore */
         }
       }
-    }
-    return { sessionKey, userId };
+    };
+
+    const scan = (store: Storage) => {
+      for (let i = 0; i < store.length; i++) {
+        const key = store.key(i);
+        if (!key) continue;
+        consider(key, store.getItem(key) || "");
+      }
+    };
+
+    scan(localStorage);
+    scan(sessionStorage);
+    return { ...out, localKeys: Object.keys(localStorage), sessionKeys: Object.keys(sessionStorage) };
   });
 
-  return finalizeAuth(auth);
+  const result = finalizeAuth(auth);
+  if (!result) {
+    log.warn(
+      `No Vudu auth in page storage (local=${auth.localKeys?.length ?? 0}, session=${auth.sessionKeys?.length ?? 0})`
+    );
+  }
+  return result;
+}
+
+/** Copy auth into localStorage so Playwright storageState will persist it for next sync. */
+export async function injectVuduAuthIntoLocalStorage(page: Page, auth: VuduAuth): Promise<void> {
+  await page.evaluate((a) => {
+    localStorage.setItem("mtv.vudu.weakSessionKey", a.sessionKey);
+    localStorage.setItem("mtv.vudu.userId", a.userId);
+  }, auth);
 }
 
 export interface VuduContentItem {

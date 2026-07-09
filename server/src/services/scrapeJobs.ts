@@ -244,7 +244,7 @@ async function runScrapeJob(
 
     const context = await newContext(storageState);
     try {
-      const items = await provider.scrapeLibrary(context);
+      const items = await provider.scrapeLibrary(context, onProgress);
       const snapshot = saveLibrary(provider.id, items);
       jobProgress(job, `Finished — saved ${snapshot.count} titles`, { itemsFound: snapshot.count });
       updateJob(job, {

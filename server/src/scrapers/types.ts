@@ -61,7 +61,10 @@ export interface Provider {
   isLoggedIn(page: Page): Promise<boolean>;
 
   /** Read the full purchased library using an authenticated context. */
-  scrapeLibrary(context: BrowserContext): Promise<MediaItem[]>;
+  scrapeLibrary(
+    context: BrowserContext,
+    onProgress?: (message: string, itemsFound?: number) => void
+  ): Promise<MediaItem[]>;
 }
 
 /** Thrown by scrapeLibrary when the saved session is no longer valid. */

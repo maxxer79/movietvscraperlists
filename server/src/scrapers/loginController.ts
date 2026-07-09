@@ -6,6 +6,11 @@ import { createLogger } from "../logger.js";
 import { paths } from "../services/paths.js";
 import { join } from "node:path";
 import type { LoginCredentials, LoginStep, Provider } from "./types.js";
+import {
+  extractVuduAuth,
+  injectVuduAuthIntoLocalStorage,
+} from "./vuduApi.js";
+import { dismissCookieBanner } from "./helpers.js";
 
 const log = createLogger("login");
 
@@ -42,7 +47,45 @@ async function saveScreenshot(page: Page, providerId: string, tag: string) {
   }
 }
 
+/**
+ * After a successful login, visit the library so Vudu writes session tokens,
+ * then copy them into localStorage so Playwright storageState persists them
+ * for fast API syncs (sessionStorage alone is not saved by Playwright).
+ */
+async function captureProviderAuth(login: ActiveLogin): Promise<void> {
+  if (login.provider.id !== "fandango") return;
+  try {
+    const page = login.page;
+    await page.goto("https://athome.fandango.com/content/browse/mymovies", {
+      waitUntil: "domcontentloaded",
+      timeout: 60_000,
+    });
+    await page.waitForTimeout(3000);
+    await dismissCookieBanner(page);
+
+    let auth = await extractVuduAuth(page);
+    if (!auth) {
+      // Give the SPA a bit more time to hydrate tokens.
+      await page.waitForTimeout(4000);
+      auth = await extractVuduAuth(page);
+    }
+    if (auth) {
+      await injectVuduAuthIntoLocalStorage(page, auth);
+      log.info(
+        `Captured Vudu API credentials for ${login.provider.id} (userId ${auth.userId.slice(0, 6)}…)`
+      );
+    } else {
+      log.warn(
+        `Logged into ${login.provider.id} but could not find Vudu API credentials — sync may use slow browser path`
+      );
+    }
+  } catch (err) {
+    log.warn(`Could not capture Vudu auth after login for ${login.provider.id}`, err);
+  }
+}
+
 async function finalize(login: ActiveLogin): Promise<void> {
+  await captureProviderAuth(login);
   const storageState = JSON.stringify(await login.context.storageState());
   saveSession(login.provider.id, storageState);
   await login.context.close().catch(() => {});

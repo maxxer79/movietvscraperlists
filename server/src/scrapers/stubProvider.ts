@@ -37,7 +37,10 @@ export class StubProvider implements Provider {
   async isLoggedIn(_page: Page): Promise<boolean> {
     return false;
   }
-  async scrapeLibrary(_context: BrowserContext): Promise<MediaItem[]> {
+  async scrapeLibrary(
+    _context: BrowserContext,
+    _onProgress?: (message: string, itemsFound?: number) => void
+  ): Promise<MediaItem[]> {
     throw new Error(`${this.name} scraper isn't implemented yet.`);
   }
 }
