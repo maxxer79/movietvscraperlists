@@ -1,12 +1,6 @@
 {
-<<<<<<< HEAD
-  "version": "0.1.13",
-  "build": 35,
-  "releasedAt": "2026-07-09T02:32:48.585Z",
-=======
   "version": "0.1.14",
-  "build": 35,
-  "releasedAt": "2026-07-09T02:51:03.294Z",
->>>>>>> d86c7a0 (chore: build v0.1.14 (build 35) [skip ci])
+  "build": 36,
+  "releasedAt": "2026-07-09T02:52:30.000Z",
   "codename": "Foundation"
 }
