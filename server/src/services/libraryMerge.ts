@@ -48,18 +48,18 @@ export function normalizeTitle(title: string): string {
 }
 
 /**
- * Strongest match key. Returns null when only a weak title-only key would
- * be available (no external id and no year) — caller uses unique per-item key.
+ * Strongest match key for deduplication. Always returns a unique key string;
+ * when no external id or year is available, falls back to a per-item unique key.
  */
 export function matchKey(item: MediaItem): { key: string; strength: "id" | "titleYear" | "unique" } {
   const imdb = metaString(item.meta, "imdbId") ?? metaString(item.meta, "imdb");
-  if (imdb) return { key: `imdb:${imdb.toLowerCase()}`, strength: "id" };
+  if (imdb) return { key: `imdb:${item.type}:${imdb.toLowerCase()}`, strength: "id" };
 
   const tmdb = metaString(item.meta, "tmdbId") ?? metaString(item.meta, "tmdb");
   if (tmdb) return { key: `tmdb:${item.type}:${tmdb}`, strength: "id" };
 
   const ma = metaString(item.meta, "moviesAnywhereId") ?? metaString(item.meta, "maId");
-  if (ma) return { key: `ma:${ma}`, strength: "id" };
+  if (ma) return { key: `ma:${item.type}:${ma}`, strength: "id" };
 
   if (item.year) {
     return {

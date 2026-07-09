@@ -50,6 +50,32 @@ describe("mergeLibraries", () => {
     assert.equal(merged[0].posterUrl, "https://example.com/a.jpg");
   });
 
+  it("does not merge movie with tv that share the same IMDb id", () => {
+    const inputs: ProviderLibraryInput[] = [
+      {
+        providerId: "fandango",
+        providerName: "Fandango at Home",
+        items: [
+          movie({
+            id: "m1",
+            title: "Some Title",
+            year: 2000,
+            meta: { imdbId: "tt9999999" },
+          }),
+          {
+            id: "t1",
+            title: "Some Title",
+            type: "tv",
+            year: 2000,
+            meta: { imdbId: "tt9999999" },
+          },
+        ],
+      },
+    ];
+    const merged = mergeLibraries(inputs);
+    assert.equal(merged.length, 2);
+  });
+
   it("does not merge movie with tv even if titles match", () => {
     const inputs: ProviderLibraryInput[] = [
       {
