@@ -22,18 +22,6 @@ interface CombinedRemoved extends RemovedItem {
   providerName: string;
 }
 
-function collectAll(): CombinedItem[] {
-  const out: CombinedItem[] = [];
-  for (const p of enabledProviders()) {
-    const lib = loadLibrary(p.id);
-    if (!lib) continue;
-    for (const item of lib.items) {
-      out.push({ ...item, provider: p.id, providerName: p.name });
-    }
-  }
-  return out;
-}
-
 function collectMerged(): MergedItem[] {
   const inputs = enabledProviders().map((p) => ({
     providerId: p.id,
@@ -119,13 +107,25 @@ libraryRouter.delete("/merged/:mergedId", (req, res) => {
   const merged = collectMerged().find((item) => item.id === req.params.mergedId);
   if (!merged) return res.status(404).json({ error: "Merged item not found" });
 
-  let lastCount = 0;
+  const deleted: Array<{ provider: string; itemId: string }> = [];
+  const failed: Array<{ provider: string; itemId: string; error: string }> = [];
+
   for (const r of merged.retailers) {
     const result = deleteLibraryItem(r.provider, r.itemId);
-    if (result.ok) lastCount = result.snapshot.count;
+    if (result.ok) {
+      deleted.push({ provider: r.provider, itemId: r.itemId });
+    } else {
+      failed.push({ provider: r.provider, itemId: r.itemId, error: result.error });
+    }
   }
 
-  res.json({ ok: true, count: lastCount });
+  if (failed.length && deleted.length === 0) {
+    return res.status(404).json({ ok: false, deleted, failed });
+  }
+  if (failed.length) {
+    return res.status(207).json({ ok: false, deleted, failed });
+  }
+  res.json({ ok: true, deleted });
 });
 
 // Manually remove a title (hidden from future syncs until restored).
