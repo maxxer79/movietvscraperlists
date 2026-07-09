@@ -48,7 +48,7 @@ services:
       HEADLESS: "true"
       SESSION_SECRET: "PASTE-YOUR-RANDOM-SECRET-HERE"
       APP_PASSWORD: ""          # optional: set to password-protect the UI
-      ENABLED_PROVIDERS: "fandango,sony,moviesanywhere,universal"
+      ENABLED_PROVIDERS: "fandango,moviesanywhere,appletv,googleplay,primevideo"
     volumes:
       - movietv_data:/data
     ports:

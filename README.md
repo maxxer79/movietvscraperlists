@@ -8,10 +8,11 @@ Supported services:
 
 | Service | Status |
 | --- | --- |
-| **Fandango at Home** (formerly Vudu) | ✅ Implemented |
-| **Sony Pictures Core** (formerly Bravia Core) | 🚧 Framework ready (coming next) |
+| **Fandango at Home** | ✅ Implemented |
 | **Movies Anywhere** | 🚧 Framework ready (coming next) |
-| **Universal Pictures** | 🚧 Framework ready (coming next) |
+| **Apple TV** | 🚧 Framework ready (coming next) |
+| **Google Play / YouTube** | 🚧 Framework ready (coming next) |
+| **Prime Video** | 🚧 Framework ready (coming next) |
 
 > **How it works:** none of these services offer a public "list my library" API,
 > so the app logs in *as you* using a real browser engine (Playwright) and reads
@@ -91,7 +92,7 @@ The full walkthroughs live in [`docs/`](docs/):
 | `SESSION_SECRET` | _(required)_ | Encrypts saved logins at rest |
 | `APP_PASSWORD` | _(empty)_ | Optional password gate for the whole UI |
 | `HEADLESS` | `true` | Keep `true` on servers |
-| `ENABLED_PROVIDERS` | all four | Which services show in the UI |
+| `ENABLED_PROVIDERS` | all five | Which services show in the UI |
 
 ---
 

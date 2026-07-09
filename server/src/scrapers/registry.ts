@@ -6,25 +6,32 @@ import type { Provider } from "./types.js";
 const all: Provider[] = [
   new FandangoProvider(),
   new StubProvider(
-    "sony",
-    "Sony Pictures Core",
-    "https://www.sonypicturescore.com/",
-    "https://www.sonypicturescore.com/library",
-    "Formerly Bravia Core. Redeem/library lives behind the Sony account login."
-  ),
-  new StubProvider(
     "moviesanywhere",
     "Movies Anywhere",
     "https://moviesanywhere.com/login",
     "https://moviesanywhere.com/my-movies",
-    "Aggregates titles from connected retailers. Uses Movies Anywhere account login."
+    "Movies only. Linked retailers (Fandango, Apple, etc.) are configured on your Movies Anywhere account."
   ),
   new StubProvider(
-    "universal",
-    "Universal Pictures",
-    "https://www.universalpictures.com/",
-    "https://www.universalpictures.com/",
-    "Universal Pictures Store / MyUniversal library."
+    "appletv",
+    "Apple TV",
+    "https://tv.apple.com/login",
+    "https://tv.apple.com/shop/movies",
+    "Purchased movies library. Apple ID login; 2FA supported."
+  ),
+  new StubProvider(
+    "googleplay",
+    "Google Play / YouTube",
+    "https://play.google.com/store/movies",
+    "https://play.google.com/store/movies?category=OWNED",
+    "Purchased movies on Google Play / YouTube."
+  ),
+  new StubProvider(
+    "primevideo",
+    "Prime Video",
+    "https://www.amazon.com/ap/signin",
+    "https://www.primevideo.com/",
+    "Purchased/owned movies only — not Prime subscription catalog."
   ),
 ];
 

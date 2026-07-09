@@ -22,7 +22,7 @@ services:
       SESSION_SECRET: "CHANGE-ME-to-a-long-random-string"
       # Optional: password-protect the whole UI (leave blank to disable)
       APP_PASSWORD: ""
-      ENABLED_PROVIDERS: "fandango,sony,moviesanywhere,universal"
+      ENABLED_PROVIDERS: "fandango,moviesanywhere,appletv,googleplay,primevideo"
     volumes:
       # Persists your saved logins + scraped libraries across restarts/updates
       - movietv_data:/data
