@@ -53,7 +53,8 @@ export function ProviderCard({
             </p>
             <p className="sync-hint">
               Title count below won&apos;t update until sync finishes. Large libraries typically
-              take 3–15 minutes.
+              take 3–15 minutes (API path). If credentials must be captured first, allow up to
+              ~45 minutes.
             </p>
             {syncProgress.logLines.length > 0 ? (
               <button type="button" className="sync-log-toggle" onClick={onToggleLog}>

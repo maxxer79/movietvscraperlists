@@ -144,16 +144,91 @@ export async function extractVuduAuth(page: Page): Promise<VuduAuth | null> {
 
     scan(localStorage);
     scan(sessionStorage);
-    return { ...out, localKeys: Object.keys(localStorage), sessionKeys: Object.keys(sessionStorage) };
+    return {
+      ...out,
+      localKeys: Object.keys(localStorage),
+      sessionKeys: Object.keys(sessionStorage),
+    };
   });
 
   const result = finalizeAuth(auth);
   if (!result) {
     log.warn(
-      `No Vudu auth in page storage (local=${auth.localKeys?.length ?? 0}, session=${auth.sessionKeys?.length ?? 0})`
+      `No Vudu auth in page storage (local=${auth.localKeys?.length ?? 0}, session=${auth.sessionKeys?.length ?? 0}) keys local=[${(auth.localKeys || []).slice(0, 30).join(",")}] session=[${(auth.sessionKeys || []).slice(0, 30).join(",")}]`
     );
   }
   return result;
+}
+
+/** Pull sessionKey + userId out of a Vudu API URL (query string). */
+export function extractVuduAuthFromUrl(url: string): VuduAuth | null {
+  try {
+    const u = new URL(url);
+    const sessionKey =
+      u.searchParams.get("sessionKey") ||
+      u.searchParams.get("weakSessionKey") ||
+      undefined;
+    const userId =
+      u.searchParams.get("userId") ||
+      u.searchParams.get("userID") ||
+      u.searchParams.get("accountId") ||
+      undefined;
+    return finalizeAuth({ sessionKey: sessionKey || undefined, userId: userId || undefined });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Listen for api.vudu.com traffic and capture sessionKey/userId from request URLs.
+ * The modern Fandango SPA often keeps tokens in memory / IndexedDB, but still
+ * sends them on every library API call.
+ */
+export async function captureVuduAuthFromNetwork(
+  page: Page,
+  timeoutMs = 45_000
+): Promise<VuduAuth | null> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (auth: VuduAuth | null) => {
+      if (settled) return;
+      settled = true;
+      page.off("request", onRequest);
+      page.off("response", onResponse);
+      clearTimeout(timer);
+      resolve(auth);
+    };
+
+    const considerUrl = (url: string) => {
+      if (!/api\.vudu\.com/i.test(url)) return;
+      const auth = extractVuduAuthFromUrl(url);
+      if (auth) {
+        log.info(`Captured Vudu auth from network request (userId ${auth.userId.slice(0, 6)}…)`);
+        finish(auth);
+      }
+    };
+
+    const onRequest = (req: { url: () => string }) => considerUrl(req.url());
+    const onResponse = (res: { url: () => string }) => considerUrl(res.url());
+
+    page.on("request", onRequest);
+    page.on("response", onResponse);
+
+    const timer = setTimeout(() => finish(null), timeoutMs);
+  });
+}
+
+/** Best-effort dump of storage key names for debugging auth capture failures. */
+export async function describePageStorage(page: Page): Promise<string> {
+  try {
+    return await page.evaluate(() => {
+      const local = Object.keys(localStorage);
+      const session = Object.keys(sessionStorage);
+      return `localStorage(${local.length}): ${local.slice(0, 40).join(", ") || "(empty)"}; sessionStorage(${session.length}): ${session.slice(0, 40).join(", ") || "(empty)"}`;
+    });
+  } catch {
+    return "could not read page storage";
+  }
 }
 
 /** Copy auth into localStorage so Playwright storageState will persist it for next sync. */

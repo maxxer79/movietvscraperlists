@@ -7,6 +7,7 @@ import { paths } from "../services/paths.js";
 import { join } from "node:path";
 import type { LoginCredentials, LoginStep, Provider } from "./types.js";
 import {
+  captureVuduAuthFromNetwork,
   extractVuduAuth,
   injectVuduAuthIntoLocalStorage,
 } from "./vuduApi.js";
@@ -56,6 +57,7 @@ async function captureProviderAuth(login: ActiveLogin): Promise<void> {
   if (login.provider.id !== "fandango") return;
   try {
     const page = login.page;
+    const networkAuthPromise = captureVuduAuthFromNetwork(page, 45_000);
     await page.goto("https://athome.fandango.com/content/browse/mymovies", {
       waitUntil: "domcontentloaded",
       timeout: 60_000,
@@ -65,9 +67,9 @@ async function captureProviderAuth(login: ActiveLogin): Promise<void> {
 
     let auth = await extractVuduAuth(page);
     if (!auth) {
-      // Give the SPA a bit more time to hydrate tokens.
-      await page.waitForTimeout(4000);
-      auth = await extractVuduAuth(page);
+      await page.evaluate(() => window.scrollBy(0, 600)).catch(() => {});
+      await page.waitForTimeout(2000);
+      auth = (await extractVuduAuth(page)) || (await networkAuthPromise);
     }
     if (auth) {
       await injectVuduAuthIntoLocalStorage(page, auth);
@@ -76,7 +78,7 @@ async function captureProviderAuth(login: ActiveLogin): Promise<void> {
       );
     } else {
       log.warn(
-        `Logged into ${login.provider.id} but could not find Vudu API credentials — sync may use slow browser path`
+        `Logged into ${login.provider.id} but could not find Vudu API credentials — sync will try network capture again`
       );
     }
   } catch (err) {

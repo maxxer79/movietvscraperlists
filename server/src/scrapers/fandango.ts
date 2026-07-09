@@ -19,6 +19,8 @@ import {
 } from "./helpers.js";
 import { createLogger } from "../logger.js";
 import {
+  captureVuduAuthFromNetwork,
+  describePageStorage,
   extractVuduAuth,
   extractVuduAuthFromStorageState,
   fetchBundleContents,
@@ -188,27 +190,45 @@ export class FandangoProvider implements Provider {
   ): Promise<MediaItem[]> {
     const page = await context.newPage();
     try {
-      onProgress?.("Opening Fandango in browser to read session…", 0);
+      onProgress?.("Opening Fandango in browser to capture API credentials…", 0);
+
+      // Start listening BEFORE navigation so we catch the SPA's first library API calls.
+      const networkAuthPromise = captureVuduAuthFromNetwork(page, 60_000);
+
       await page.goto("https://athome.fandango.com/content/browse/mymovies", {
         waitUntil: "domcontentloaded",
         timeout: 60_000,
       });
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(2500);
       await dismissCookieBanner(page);
 
       if (/\/content\/account\/login/i.test(page.url())) {
         throw new SessionExpiredError();
       }
 
+      // Try storage first (fast), then wait for network capture.
       let auth = await extractVuduAuth(page);
       if (!auth) {
-        onProgress?.("Waiting for Vudu session tokens…", 0);
-        await page.waitForTimeout(4000);
-        auth = await extractVuduAuth(page);
+        onProgress?.("Listening for Vudu API requests to capture session…", 0);
+        // Nudge the SPA to load more library traffic.
+        await page.evaluate(() => window.scrollBy(0, 800)).catch(() => {});
+        await page.waitForTimeout(2000);
+        auth = (await extractVuduAuth(page)) || (await networkAuthPromise);
+      }
+
+      if (!auth) {
+        // One more try: visit TV library too (may trigger more API calls).
+        onProgress?.("Trying TV library page for API credentials…", 0);
+        const tvAuthPromise = captureVuduAuthFromNetwork(page, 30_000);
+        await page.goto("https://athome.fandango.com/content/browse/mytv", {
+          waitUntil: "domcontentloaded",
+          timeout: 60_000,
+        });
+        await page.waitForTimeout(3000);
+        auth = (await extractVuduAuth(page)) || (await tvAuthPromise);
       }
 
       if (auth) {
-        // Persist into localStorage so the next sync can skip the browser.
         await injectVuduAuthIntoLocalStorage(page, auth);
         try {
           const storageState = JSON.stringify(await context.storageState());
@@ -219,16 +239,18 @@ export class FandangoProvider implements Provider {
         }
 
         log.info(`Using Vudu API via browser (userId ${auth.userId.slice(0, 6)}…)`);
-        onProgress?.("Using fast API sync (credentials found in browser)…", 0);
+        onProgress?.("Using fast API sync (credentials captured)…", 0);
         return this.scrapeViaApi(auth, onProgress);
       }
 
-      log.warn("No Vudu session in page storage — falling back to DOM scroll scrape");
-      onProgress?.(
-        "No API credentials found — scrolling library pages (very slow for 1000+ titles)…",
-        0
+      const storageDump = await describePageStorage(page);
+      log.error(`Could not capture Vudu auth. ${storageDump}`);
+      onProgress?.(`Auth capture failed. ${storageDump}`, 0);
+      throw new Error(
+        "Could not capture Fandango/Vudu API credentials from the browser. " +
+          "Disconnect, Connect again (complete any email code), then Sync. " +
+          "DOM scrolling is disabled because it cannot load 1000+ titles reliably."
       );
-      return this.scrapeViaDom(page, onProgress);
     } finally {
       await page.close().catch(() => {});
     }

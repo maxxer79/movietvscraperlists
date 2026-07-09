@@ -85,7 +85,8 @@ export function App() {
       }
       toast(`${name}: syncing library — this may take a few minutes…`);
 
-      const deadline = Date.now() + 15 * 60 * 1000;
+      // Large libraries + credential capture can take a while; keep polling for 45 min.
+      const deadline = Date.now() + 45 * 60 * 1000;
       while (Date.now() < deadline) {
         let status;
         try {
@@ -137,7 +138,7 @@ export function App() {
         }
         throw new Error(status.error || status.message || "Sync failed");
       }
-      throw new Error("Sync timed out after 15 minutes — try again");
+      throw new Error("Sync timed out after 45 minutes — check the sync log and try again");
     } catch (e) {
       const err = e as Error & { body?: { sessionExpired?: boolean } };
       if (err.body?.sessionExpired) {
