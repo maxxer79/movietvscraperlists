@@ -6,6 +6,7 @@ import { ProviderCard } from "./components/ProviderCard";
 import { LoginModal } from "./components/LoginModal";
 import { MediaCard } from "./components/MediaCard";
 import { PasswordGate } from "./components/PasswordGate";
+import { AzNav, titleLetter } from "./components/AzNav";
 
 export function App() {
   const [locked, setLocked] = useState(false);
@@ -203,6 +204,17 @@ export function App() {
     return sorted;
   }, [items, filterProvider, filterType, filterQuality, search, sort]);
 
+  const azLetters = useMemo(() => {
+    const set = new Set<string>();
+    for (const item of filtered) set.add(titleLetter(item.title));
+    return set;
+  }, [filtered]);
+
+  function jumpToLetter(letter: string) {
+    const el = document.querySelector(`[data-letter="${letter}"]`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   function download(format: "csv" | "json") {
     const provider = filterProvider !== "all" ? filterProvider : undefined;
     window.open(api.exportUrl(format, provider), "_blank");
@@ -345,14 +357,28 @@ export function App() {
           </p>
         </div>
       ) : (
-        <div className="library-grid">
-          {filtered.map((item) => (
-            <MediaCard
-              key={`${item.provider}:${item.id}`}
-              item={item}
-              showProvider={filterProvider === "all"}
-            />
-          ))}
+        <div className="library-layout">
+          <AzNav available={azLetters} onJump={jumpToLetter} />
+          <div className="library-grid">
+            {filtered.map((item, index) => {
+              const letter = titleLetter(item.title);
+              const prevLetter =
+                index > 0 ? titleLetter(filtered[index - 1].title) : null;
+              const isFirstOfLetter = letter !== prevLetter;
+              return (
+                <div
+                  key={`${item.provider}:${item.id}`}
+                  data-letter={isFirstOfLetter ? letter : undefined}
+                  className="library-grid-item"
+                >
+                  <MediaCard
+                    item={item}
+                    showProvider={filterProvider === "all"}
+                  />
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

@@ -57,7 +57,8 @@ libraryRouter.get("/export", (req, res) => {
     return res.send(JSON.stringify(items, null, 2));
   }
 
-  const csv = toCsv(items, providerId ? undefined : "provider");
+  // Expand bundles into one CSV row per included title; include Provider when exporting all services.
+  const csv = toCsv(items, !providerId);
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="${base}.csv"`);
   res.send("\uFEFF" + csv); // BOM so Excel reads UTF-8 correctly

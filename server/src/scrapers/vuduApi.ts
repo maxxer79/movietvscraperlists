@@ -1037,8 +1037,11 @@ export async function fetchVuduLibrary(
       params.append("type", "program");
       params.append("type", "bundle");
     } else {
+      // Mirror movies: many owned TV titles are stored as program/bundle, not only season/series.
       params.append("type", "season");
       params.append("type", "series");
+      params.append("type", "program");
+      params.append("type", "bundle");
     }
 
     const data = await vuduGet(

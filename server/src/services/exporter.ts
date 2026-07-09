@@ -6,24 +6,95 @@ function csvCell(value: unknown): string {
   return s;
 }
 
-const COLUMNS: Array<{ key: keyof MediaItem; header: string }> = [
-  { key: "title", header: "Title" },
-  { key: "type", header: "Type" },
-  { key: "year", header: "Year" },
-  { key: "quality", header: "Quality" },
-  { key: "url", header: "URL" },
-  { key: "posterUrl", header: "Poster" },
-];
+export interface CsvExportItem {
+  title: string;
+  type: string;
+  year?: number;
+  quality?: string;
+  url?: string;
+  posterUrl?: string;
+  providerName?: string;
+  /** Set when this row came from expanding a bundle/collection. */
+  fromCollection?: string;
+}
 
-export function toCsv(items: MediaItem[], providerColumn?: string): string {
+/**
+ * Flatten library items for CSV: each title in a bundle/collection becomes its own row.
+ * Parent collection rows are omitted when children were expanded.
+ */
+export function flattenItemsForCsv(
+  items: Array<
+    MediaItem & {
+      providerName?: string;
+      meta?: {
+        isCollection?: boolean;
+        contentKind?: string;
+        collectionItems?: Array<{
+          id: string;
+          title: string;
+          year?: number;
+          type?: string;
+        }>;
+      };
+    }
+  >
+): CsvExportItem[] {
+  const out: CsvExportItem[] = [];
+  for (const item of items) {
+    const children = item.meta?.collectionItems;
+    if (children && children.length > 0) {
+      for (const child of children) {
+        out.push({
+          title: child.title,
+          type: child.type || item.type,
+          year: child.year,
+          quality: item.quality,
+          url: item.url,
+          posterUrl: undefined,
+          providerName: item.providerName,
+          fromCollection: item.title,
+        });
+      }
+      continue;
+    }
+    out.push({
+      title: item.title,
+      type: item.type,
+      year: item.year,
+      quality: item.quality,
+      url: item.url,
+      posterUrl: item.posterUrl,
+      providerName: item.providerName,
+    });
+  }
+  return out;
+}
+
+export function toCsv(
+  items: Array<MediaItem & { providerName?: string }>,
+  includeProvider = false
+): string {
+  const flat = flattenItemsForCsv(items);
   const headers = [
-    ...(providerColumn ? ["Provider"] : []),
-    ...COLUMNS.map((c) => c.header),
+    ...(includeProvider ? ["Provider"] : []),
+    "Title",
+    "Type",
+    "Year",
+    "Quality",
+    "URL",
+    "Poster",
+    "From Collection",
   ];
-  const rows = items.map((item) =>
+  const rows = flat.map((item) =>
     [
-      ...(providerColumn ? [providerColumn] : []),
-      ...COLUMNS.map((c) => csvCell(item[c.key])),
+      ...(includeProvider ? [csvCell(item.providerName)] : []),
+      csvCell(item.title),
+      csvCell(item.type),
+      csvCell(item.year),
+      csvCell(item.quality),
+      csvCell(item.url),
+      csvCell(item.posterUrl),
+      csvCell(item.fromCollection),
     ].join(",")
   );
   return [headers.join(","), ...rows].join("\r\n");
