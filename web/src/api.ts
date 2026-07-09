@@ -120,6 +120,12 @@ export const api = {
       `/api/library/${encodeURIComponent(providerId)}/${encodeURIComponent(itemId)}`,
       { method: "DELETE" }
     ),
+  deleteMergedItem: (mergedId: string) =>
+    req<{
+      ok: boolean;
+      deleted?: Array<{ provider: string; itemId: string }>;
+      failed?: Array<{ provider: string; itemId: string; error: string }>;
+    }>(`/api/library/merged/${encodeURIComponent(mergedId)}`, { method: "DELETE" }),
   restoreItem: (providerId: string, itemId: string) =>
     req<{ ok: boolean }>(
       `/api/library/${encodeURIComponent(providerId)}/${encodeURIComponent(itemId)}/restore`,

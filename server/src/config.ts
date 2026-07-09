@@ -18,7 +18,7 @@ export const config = {
   appPassword: process.env.APP_PASSWORD || "",
   headless: bool(process.env.HEADLESS, true),
   enabledProviders: (process.env.ENABLED_PROVIDERS ||
-    "fandango,sony,moviesanywhere,universal")
+    "fandango,moviesanywhere,appletv,googleplay,primevideo")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean),

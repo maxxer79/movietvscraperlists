@@ -187,7 +187,10 @@ export function App() {
 
   const filtered = useMemo(() => {
     let list = items;
-    if (filterProvider !== "all") list = list.filter((i) => i.provider === filterProvider);
+    if (filterProvider !== "all")
+      list = list.filter((i) =>
+        (i.retailers ?? []).some((r) => r.provider === filterProvider)
+      );
     if (filterType !== "all") list = list.filter((i) => i.type === filterType);
     if (filterQuality !== "all")
       list = list.filter((i) =>
@@ -202,7 +205,11 @@ export function App() {
     const sorted = [...list];
     sorted.sort((a, b) => {
       if (sort === "year") return (b.year || 0) - (a.year || 0);
-      if (sort === "provider") return a.providerName.localeCompare(b.providerName);
+      if (sort === "provider") {
+        const names = (i: CombinedItem) =>
+          (i.retailers ?? []).map((r) => r.providerName).join(", ");
+        return names(a).localeCompare(names(b));
+      }
       return a.title.localeCompare(b.title);
     });
     return sorted;
@@ -222,13 +229,23 @@ export function App() {
   async function deleteItem(item: CombinedItem) {
     if (
       !confirm(
-        `Remove “${item.title}” from your library?\n\nIt will stay hidden on future Syncs until you undo it from Removed.`
+        `Remove “${item.title}” from all retailers currently listed on this card?\n\nIt will stay hidden on future Syncs until you undo it from Removed.`
       )
     ) {
       return;
     }
     try {
-      await api.deleteItem(item.provider, item.id);
+      const result = await api.deleteMergedItem(item.id);
+      if (result.failed && result.failed.length > 0) {
+        const n = Array.isArray(result.failed) ? result.failed.length : 0;
+        toast(
+          result.ok === false && (!result.deleted || (result.deleted as unknown[]).length === 0)
+            ? `Could not remove “${item.title}”`
+            : `Removed “${item.title}” from some retailers; ${n} failed — refresh to see what's left`
+        );
+        await refresh();
+        return;
+      }
       toast(`Removed “${item.title}”`);
       await refresh();
       setLibraryTab("removed");

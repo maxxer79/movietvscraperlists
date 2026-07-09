@@ -1,31 +1,17 @@
 import { config } from "../config.js";
+import { AppleTvProvider } from "./appletv.js";
 import { FandangoProvider } from "./fandango.js";
-import { StubProvider } from "./stubProvider.js";
+import { GooglePlayProvider } from "./googleplay.js";
+import { MoviesAnywhereProvider } from "./moviesanywhere.js";
+import { PrimeVideoProvider } from "./primevideo.js";
 import type { Provider } from "./types.js";
 
 const all: Provider[] = [
   new FandangoProvider(),
-  new StubProvider(
-    "sony",
-    "Sony Pictures Core",
-    "https://www.sonypicturescore.com/",
-    "https://www.sonypicturescore.com/library",
-    "Formerly Bravia Core. Redeem/library lives behind the Sony account login."
-  ),
-  new StubProvider(
-    "moviesanywhere",
-    "Movies Anywhere",
-    "https://moviesanywhere.com/login",
-    "https://moviesanywhere.com/my-movies",
-    "Aggregates titles from connected retailers. Uses Movies Anywhere account login."
-  ),
-  new StubProvider(
-    "universal",
-    "Universal Pictures",
-    "https://www.universalpictures.com/",
-    "https://www.universalpictures.com/",
-    "Universal Pictures Store / MyUniversal library."
-  ),
+  new MoviesAnywhereProvider(),
+  new AppleTvProvider(),
+  new GooglePlayProvider(),
+  new PrimeVideoProvider(),
 ];
 
 const byId = new Map(all.map((p) => [p.id, p]));

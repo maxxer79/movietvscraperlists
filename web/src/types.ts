@@ -33,13 +33,30 @@ export interface MediaItem {
       year?: number;
       type?: string;
     }>;
+    imdbId?: string;
+    tmdbId?: string;
+    moviesAnywhereId?: string;
+    [key: string]: unknown;
   };
 }
 
-export interface CombinedItem extends MediaItem {
+export interface RetailerPresence {
+  provider: string;
+  providerName: string;
+  itemId: string;
+  quality?: string;
+  url?: string;
+}
+
+export interface MergedItem extends MediaItem {
+  retailers: RetailerPresence[];
+  /** Primary retailer (first); used as fallback. */
   provider: string;
   providerName: string;
 }
+
+/** Alias while migrating — same as MergedItem */
+export type CombinedItem = MergedItem;
 
 export interface RemovedItem {
   id: string;

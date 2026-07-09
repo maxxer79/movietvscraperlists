@@ -8,10 +8,11 @@ Supported services:
 
 | Service | Status |
 | --- | --- |
-| **Fandango at Home** (formerly Vudu) | ✅ Implemented |
-| **Sony Pictures Core** (formerly Bravia Core) | 🚧 Framework ready (coming next) |
-| **Movies Anywhere** | 🚧 Framework ready (coming next) |
-| **Universal Pictures** | 🚧 Framework ready (coming next) |
+| **Fandango at Home** | ✅ Implemented |
+| **Movies Anywhere** | ✅ Implemented (verify Connect/Sync with your account) |
+| **Apple TV** | ✅ Implemented (verify Connect/Sync; selectors may need tuning) |
+| **Google Play / YouTube** | ✅ Implemented (verify Connect/Sync; selectors may need tuning) |
+| **Prime Video** | ✅ Implemented (purchased/owned movies; verify Connect/Sync) |
 
 > **How it works:** none of these services offer a public "list my library" API,
 > so the app logs in *as you* using a real browser engine (Playwright) and reads
@@ -24,7 +25,8 @@ Supported services:
 
 - **Apple-style UI** — rounded buttons, drop shadows, frosted panels, **dark mode by default** (with a light toggle).
 - **Assisted login** with full 2-factor support, handled right in the web UI.
-- **One combined library** across all connected services, with search, filters (service / quality) and sorting.
+- **One combined library** across all connected services — same title merges into **one card** with retailer badges; search, filters (service / quality), and sorting included.
+- **Removal tracking** when a retailer drops a title from your account (badge disappears; Removed tab lists the loss).
 - **Export** the whole list or a single service to **CSV** or **JSON**.
 - **Version badge** on the page — every build bumps the number so you always know what's live.
 - **Single container** — API + web served together. Ready for Portainer + Caddy.
@@ -91,7 +93,7 @@ The full walkthroughs live in [`docs/`](docs/):
 | `SESSION_SECRET` | _(required)_ | Encrypts saved logins at rest |
 | `APP_PASSWORD` | _(empty)_ | Optional password gate for the whole UI |
 | `HEADLESS` | `true` | Keep `true` on servers |
-| `ENABLED_PROVIDERS` | all four | Which services show in the UI |
+| `ENABLED_PROVIDERS` | all five | Which services show in the UI |
 
 ---
 
@@ -114,12 +116,12 @@ movietvscraperlists/
 
 ---
 
-## 🛠️ Adding the remaining scrapers
+## 🛠️ Tuning scrapers
 
 Each service is a `Provider` (see `server/src/scrapers/types.ts`). `FandangoProvider`
-is the reference implementation. The stub providers already appear in the UI —
-replace them one at a time. On the first real login/scrape, DOM + screenshots are
-saved to `data/debug/` so selectors can be tuned quickly (search the code for
+is the most battle-tested reference. Apple / Google / Prime / Movies Anywhere use
+defensive selectors and API capture; on the first real login/scrape, DOM + screenshots
+are saved to `data/debug/` so selectors can be tuned quickly (search the code for
 `TUNE:`).
 
 ---
