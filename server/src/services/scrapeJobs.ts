@@ -262,6 +262,7 @@ async function runScrapeJob(
     const finishedAt = new Date().toISOString();
     if (err instanceof SessionExpiredError) {
       clearSession(provider.id);
+      appendJobLog(job, `ERROR: ${err.message}`);
       updateJob(job, {
         status: "error",
         sessionExpired: true,

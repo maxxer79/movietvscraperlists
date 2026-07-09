@@ -370,7 +370,7 @@ function assertVuduOk(data: Record<string, unknown>, context: string): void {
   const detail = [code, subCode, text].filter(Boolean).join(" / ");
   if (code === "authenticationExpired" || code === "accessDenied") {
     throw new SessionExpiredError(
-      "Fandango session expired. Please disconnect and log in again."
+      "Fandango session expired. Disconnect, Connect again (complete any email code), then Sync."
     );
   }
   throw new Error(`Vudu API error (${context}): ${detail}`);
@@ -536,6 +536,11 @@ export async function fetchVuduLibraryWithFallback(
       onAttempt?.(`Succeeded with ${attempt.label}`);
       return rows;
     } catch (err) {
+      // Expired sessions fail the same way for every appId — don't burn time retrying.
+      if (err instanceof SessionExpiredError) {
+        onAttempt?.(err.message);
+        throw err;
+      }
       lastErr = err as Error;
       log.warn(`${attempt.label} failed: ${lastErr.message}`);
       onAttempt?.(`${attempt.label} failed: ${lastErr.message}`);

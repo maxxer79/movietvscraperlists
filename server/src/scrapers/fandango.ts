@@ -55,7 +55,7 @@ export class FandangoProvider implements Provider {
     "https://athome.fandango.com/content/account/login?type=vudu_auth";
   readonly libraryUrl = "https://athome.fandango.com/content/browse/mymovies";
   readonly notes =
-    "Formerly Vudu. May send an email verification code on new devices. After connecting, Sync uses the Vudu API (fast). If sync says credentials are missing, Disconnect and Connect again.";
+    "Formerly Vudu. May send an email verification code on new devices. If sync says session expired, Disconnect and Connect again before Syncing.";
 
   // Your purchased library lives on two dedicated pages. We scrape ONLY these,
   // so wishlist and other lists are ignored.
