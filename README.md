@@ -116,12 +116,12 @@ movietvscraperlists/
 
 ---
 
-## 🛠️ Adding the remaining scrapers
+## 🛠️ Tuning scrapers
 
 Each service is a `Provider` (see `server/src/scrapers/types.ts`). `FandangoProvider`
-is the reference implementation. The stub providers already appear in the UI —
-replace them one at a time. On the first real login/scrape, DOM + screenshots are
-saved to `data/debug/` so selectors can be tuned quickly (search the code for
+is the most battle-tested reference. Apple / Google / Prime / Movies Anywhere use
+defensive selectors and API capture; on the first real login/scrape, DOM + screenshots
+are saved to `data/debug/` so selectors can be tuned quickly (search the code for
 `TUNE:`).
 
 ---
