@@ -57,9 +57,18 @@ export function MediaCard({
           {item.quality ? (
             <span className={`chip ${is4k ? "chip-4k" : ""}`}>{item.quality}</span>
           ) : null}
-          {showProvider ? (
-            <span className="chip chip-provider">{item.providerName}</span>
-          ) : null}
+          {showProvider
+            ? (item.retailers ?? []).map((r) => (
+                <span
+                  key={`${r.provider}:${r.itemId}`}
+                  className="chip chip-provider"
+                  title={r.quality}
+                >
+                  {r.providerName}
+                  {r.quality ? ` · ${r.quality}` : ""}
+                </span>
+              ))
+            : null}
         </div>
         {isCollection && collectionItems.length > 0 ? (
           <div className="collection-block">
