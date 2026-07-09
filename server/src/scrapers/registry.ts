@@ -1,17 +1,12 @@
 import { config } from "../config.js";
 import { FandangoProvider } from "./fandango.js";
+import { MoviesAnywhereProvider } from "./moviesanywhere.js";
 import { StubProvider } from "./stubProvider.js";
 import type { Provider } from "./types.js";
 
 const all: Provider[] = [
   new FandangoProvider(),
-  new StubProvider(
-    "moviesanywhere",
-    "Movies Anywhere",
-    "https://moviesanywhere.com/login",
-    "https://moviesanywhere.com/my-movies",
-    "Movies only. Linked retailers (Fandango, Apple, etc.) are configured on your Movies Anywhere account."
-  ),
+  new MoviesAnywhereProvider(),
   new StubProvider(
     "appletv",
     "Apple TV",

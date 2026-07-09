@@ -9,7 +9,7 @@ Supported services:
 | Service | Status |
 | --- | --- |
 | **Fandango at Home** | ✅ Implemented |
-| **Movies Anywhere** | 🚧 Framework ready (coming next) |
+| **Movies Anywhere** | ✅ Implemented (verify Connect/Sync with your account) |
 | **Apple TV** | 🚧 Framework ready (coming next) |
 | **Google Play / YouTube** | 🚧 Framework ready (coming next) |
 | **Prime Video** | 🚧 Framework ready (coming next) |
