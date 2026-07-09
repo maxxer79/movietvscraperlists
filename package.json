@@ -1,7 +1,7 @@
 {
   "name": "movietvscraperlists",
   "private": true,
-  "version": "0.1.15",
+  "version": "0.2.0",
   "description": "Self-hosted scraper that lists movies & TV shows purchased across Fandango at Home, Movies Anywhere, Apple TV, Google Play/YouTube, and Prime Video.",
   "workspaces": [
     "server",
