@@ -21,20 +21,14 @@ import { createLogger } from "../logger.js";
 import {
   captureVuduAuthFromNetwork,
   clearStaleVuduSessionKeys,
-  cookieHeaderFromStorageState,
   describePageStorage,
-  extractLightDeviceFromPage,
-  extractLightDeviceFromStorageState,
   extractVuduAuth,
   extractVuduAuthFromStorageState,
   fetchBundleContents,
   fetchVuduLibraryWithFallback,
   injectVuduAuthIntoLocalStorage,
-  injectVuduAuthIntoStorageState,
   isBundleItem,
   releaseYear,
-  renewVuduSessionWithBrowserCookies,
-  renewVuduSessionWithLightDevice,
   validateVuduAuth,
   vuduDetailUrl,
   type VuduAuth,
@@ -63,7 +57,7 @@ export class FandangoProvider implements Provider {
     "https://athome.fandango.com/content/account/login?type=vudu_auth";
   readonly libraryUrl = "https://athome.fandango.com/content/browse/mymovies";
   readonly notes =
-    "Formerly Vudu. May send an email verification code on new devices. If sync says session expired, Disconnect and Connect again before Syncing.";
+    "Formerly Vudu. Connect mints a fresh API sessionKey (needed for Sync). If Sync says session expired, Disconnect and Connect again (complete any email code), then Sync.";
 
   // Your purchased library lives on two dedicated pages. We scrape ONLY these,
   // so wishlist and other lists are ignored.
@@ -199,9 +193,8 @@ export class FandangoProvider implements Provider {
   ): Promise<MediaItem[]> {
     const page = await context.newPage();
     try {
-      onProgress?.("Opening Fandango in browser to refresh API credentials…", 0);
+      onProgress?.("Opening Fandango in browser to look for a live API session…", 0);
 
-      // Stale weak/strong keys poison the SPA — drop them so it remints or we renew.
       await page.goto("https://athome.fandango.com/content/browse/mymovies", {
         waitUntil: "domcontentloaded",
         timeout: 60_000,
@@ -215,90 +208,41 @@ export class FandangoProvider implements Provider {
         );
       }
 
+      // Drop poisoned keys, then listen briefly for a live API call from the SPA.
       await clearStaleVuduSessionKeys(page);
-      onProgress?.("Cleared expired session keys — listening for a fresh Vudu API session…", 0);
-
-      const networkAuthPromise = captureVuduAuthFromNetwork(page, 25_000);
+      const networkAuthPromise = captureVuduAuthFromNetwork(page, 20_000);
       await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-      await page.waitForTimeout(2500);
-      await dismissCookieBanner(page);
+      await page.waitForTimeout(2000);
       await page.evaluate(() => window.scrollBy(0, 800)).catch(() => {});
-      await page.waitForTimeout(1500);
 
-      // Prefer Playwright request API (browser cookies, bypasses patched page fetch).
-      let auth: VuduAuth | null = null;
-      const device = await extractLightDeviceFromPage(page);
-      if (device?.lightDeviceKey) {
-        onProgress?.("Renewing Vudu session with browser cookies…", 0);
-        const renewed = await renewVuduSessionWithBrowserCookies(page, device, (msg) =>
-          onProgress?.(msg, 0)
-        );
-        auth = renewed ? await validateVuduAuth(renewed) : null;
-        if (auth) onProgress?.("Browser-cookie light-device renewal succeeded", 0);
-      }
-
-      if (!auth) {
-        onProgress?.("Waiting for live Vudu API session from the page…", 0);
-        const networkAuth = await networkAuthPromise;
-        if (networkAuth) {
-          onProgress?.("Validating live API session…", 0);
-          auth = await validateVuduAuth(networkAuth);
-        }
-      }
+      let auth = await networkAuthPromise;
+      if (auth) auth = await validateVuduAuth(auth);
 
       if (!auth) {
         const stored = await extractVuduAuth(page);
-        if (stored) {
-          onProgress?.("Validating tokens found in page storage…", 0);
-          auth = await validateVuduAuth(stored);
-        }
-      }
-
-      if (!auth) {
-        onProgress?.("Trying TV library page for live API credentials…", 0);
-        const tvAuthPromise = captureVuduAuthFromNetwork(page, 20_000);
-        await page.goto("https://athome.fandango.com/content/browse/mytv", {
-          waitUntil: "domcontentloaded",
-          timeout: 60_000,
-        });
-        await page.waitForTimeout(2500);
-        if (/\/content\/account\/login/i.test(page.url())) {
-          throw new SessionExpiredError(
-            "Fandango session expired. Disconnect, Connect again (complete any email code), then Sync."
-          );
-        }
-        if (device?.lightDeviceKey) {
-          const renewed = await renewVuduSessionWithBrowserCookies(page, device, (msg) =>
-            onProgress?.(msg, 0)
-          );
-          auth = renewed ? await validateVuduAuth(renewed) : null;
-        }
-        if (!auth) {
-          const tvAuth = (await tvAuthPromise) || (await extractVuduAuth(page));
-          auth = tvAuth ? await validateVuduAuth(tvAuth) : null;
-        }
+        auth = stored ? await validateVuduAuth(stored) : null;
       }
 
       if (auth) {
         await injectVuduAuthIntoLocalStorage(page, auth);
         try {
-          const storageState = JSON.stringify(await context.storageState());
-          saveSession(this.id, storageState);
+          saveSession(this.id, JSON.stringify(await context.storageState()));
           onProgress?.("Saved refreshed API credentials for next sync", 0);
         } catch (err) {
           log.warn("Could not re-save session with Vudu credentials", err);
         }
-
-        log.info(`Using Vudu API via browser (userId ${auth.userId.slice(0, 6)}…)`);
         onProgress?.("Using fast API sync (credentials refreshed)…", 0);
         return this.scrapeViaApi(auth, onProgress);
       }
 
       const storageDump = await describePageStorage(page);
-      log.error(`Could not capture live Vudu auth. ${storageDump}`);
-      onProgress?.(`Auth capture failed. ${storageDump}`, 0);
+      log.error(`No usable Vudu API session. ${storageDump}`);
+      onProgress?.(
+        "Cookie login is still valid, but Vudu API tokens are dead and cannot be renewed without your password.",
+        0
+      );
       throw new SessionExpiredError(
-        "Could not refresh Fandango/Vudu API credentials. Disconnect, Connect again (complete any email code), then Sync."
+        "Fandango API session expired. Disconnect, Connect again (complete any email code) — Connect mints a fresh API key — then Sync."
       );
     } finally {
       await page.close().catch(() => {});
@@ -308,7 +252,7 @@ export class FandangoProvider implements Provider {
   /**
    * Lightweight sync: read saved session credentials and call the Vudu API directly.
    * Returns null if credentials are missing OR expired so the caller can open a
-   * browser to refresh them. Avoids launching Chromium on the happy path.
+   * browser (which will fail fast and ask for reconnect if tokens cannot be reminted).
    */
   async scrapeFromStorageState(
     storageStateJson: string,
@@ -317,9 +261,6 @@ export class FandangoProvider implements Provider {
     const auth = extractVuduAuthFromStorageState(storageStateJson);
     if (!auth) {
       onProgress?.("Could not read Vudu credentials from saved session");
-      // Still try light-device renewal before forcing a browser open.
-      const renewed = await this.tryLightDeviceRenewal(storageStateJson, onProgress);
-      if (renewed) return this.scrapeViaApi(renewed, onProgress);
       return null;
     }
     log.info(`Light Vudu API sync (userId ${auth.userId.slice(0, 6)}…)`);
@@ -328,59 +269,15 @@ export class FandangoProvider implements Provider {
       return await this.scrapeViaApi(auth, onProgress);
     } catch (err) {
       if (err instanceof SessionExpiredError) {
-        onProgress?.("Saved API tokens expired — trying light-device renewal…", 0);
-        const renewed = await this.tryLightDeviceRenewal(storageStateJson, onProgress);
-        if (renewed) {
-          try {
-            return await this.scrapeViaApi(renewed, onProgress);
-          } catch (err2) {
-            if (!(err2 instanceof SessionExpiredError)) throw err2;
-          }
-        }
         onProgress?.(
-          "Saved API tokens expired — opening browser to refresh session…",
+          "Saved API tokens expired — opening browser (reconnect will be required if they cannot be refreshed)…",
           0
         );
-        log.warn("Light API sync hit expired session — falling back to browser refresh");
+        log.warn("Light API sync hit expired session — falling back to browser");
         return null;
       }
       throw err;
     }
-  }
-
-  private async tryLightDeviceRenewal(
-    storageStateJson: string,
-    onProgress?: (message: string, itemsFound?: number) => void
-  ): Promise<VuduAuth | null> {
-    const device = extractLightDeviceFromStorageState(storageStateJson);
-    if (!device?.lightDeviceKey) {
-      onProgress?.("No lightDeviceKey in saved session", 0);
-      return null;
-    }
-    onProgress?.("Renewing Vudu session with light-device credentials…", 0);
-    const cookie = cookieHeaderFromStorageState(storageStateJson);
-    const renewed = await renewVuduSessionWithLightDevice(
-      device,
-      (msg) => onProgress?.(msg, 0),
-      cookie
-    );
-    if (!renewed) {
-      onProgress?.("Light-device renewal failed", 0);
-      return null;
-    }
-    const ok = await validateVuduAuth(renewed);
-    if (!ok) {
-      onProgress?.("Renewed session still rejected by Vudu API", 0);
-      return null;
-    }
-    onProgress?.("Light-device renewal succeeded — continuing API sync", 0);
-    try {
-      const patched = injectVuduAuthIntoStorageState(storageStateJson, ok);
-      saveSession(this.id, patched);
-    } catch (err) {
-      log.warn("Could not re-save session after light-device renewal", err);
-    }
-    return ok;
   }
 
   /** Paginated api.vudu.com contentSearch — reliable for 1000+ titles. listType rentedOrOwned excludes wishlist. */

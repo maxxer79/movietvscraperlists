@@ -441,51 +441,66 @@ export async function extractLightDeviceFromPage(page: Page): Promise<VuduLightD
 }
 
 /**
- * Mint a fresh weakSessionKey using the SPA's light-device binding.
- * Cookie login can stay valid while sessionKeys expire; this is how the site renews.
- *
- * Prefer renewVuduSessionWithBrowserCookies when a Playwright context is available —
- * Node fetch alone often fails without Vudu cookies, and page.evaluate(fetch) is
- * blocked by Fandango's patched window.fetch in vudu_common.js.
+ * Mint a fresh weakSessionKey with username/password (classic Vudu API login).
+ * This is the only reliable way we've found to obtain API credentials — lightDeviceKey
+ * is rejected on sessionKeyRequest, and cookie login alone does not refresh API tokens.
+ */
+export async function mintVuduSessionWithPassword(
+  userName: string,
+  password: string,
+  onAttempt?: (message: string) => void
+): Promise<VuduAuth | null> {
+  const attempts: Array<{ claimedAppId: string; label: string }> = [
+    { claimedAppId: "myvudu", label: "myvudu + password" },
+    { claimedAppId: "html5app", label: "html5app + password" },
+  ];
+
+  for (const attempt of attempts) {
+    onAttempt?.(`Trying ${attempt.label}…`);
+    try {
+      const params = new URLSearchParams({
+        claimedAppId: attempt.claimedAppId,
+        format: "application/json",
+        _type: "sessionKeyRequest",
+        followup: "user",
+        userName,
+        password,
+        weakSeconds: "25920000",
+        sensorData: "sensorData",
+      });
+      const data = await vuduGet(params, `passwordLogin/${attempt.label}`);
+      const auth = extractVuduAuthFromPayload(data);
+      if (auth) {
+        log.info(
+          `Minted Vudu session via ${attempt.label} (userId ${auth.userId.slice(0, 6)}…)`
+        );
+        onAttempt?.(`Succeeded with ${attempt.label}`);
+        return auth;
+      }
+      onAttempt?.(`${attempt.label}: response had no sessionKey`);
+    } catch (err) {
+      const msg = `${attempt.label}: ${(err as Error).message}`;
+      log.warn(msg);
+      onAttempt?.(msg);
+    }
+  }
+  return null;
+}
+
+/**
+ * @deprecated lightDeviceKey is rejected by sessionKeyRequest; kept only for diagnostics.
+ * Prefer mintVuduSessionWithPassword at Connect time.
  */
 export async function renewVuduSessionWithLightDevice(
   device: VuduLightDevice,
   onAttempt?: (message: string) => void,
   cookieHeader?: string
 ): Promise<VuduAuth | null> {
-  const attempts = buildLightDeviceRenewalAttempts(device);
-  const errors: string[] = [];
-
-  for (const attempt of attempts) {
-    try {
-      onAttempt?.(`Trying ${attempt.label}…`);
-      const params = new URLSearchParams(attempt.params);
-      const data = await vuduGet(params, `sessionKeyRequest/${attempt.label}`, {
-        cookie: cookieHeader,
-        method: attempt.method,
-      });
-      const auth = extractVuduAuthFromPayload(data);
-      if (auth) {
-        log.info(
-          `Renewed Vudu session via ${attempt.label} (userId ${auth.userId.slice(0, 6)}…)`
-        );
-        onAttempt?.(`Succeeded with ${attempt.label}`);
-        return auth;
-      }
-      const msg = `${attempt.label}: response had no sessionKey`;
-      log.warn(msg);
-      errors.push(msg);
-      onAttempt?.(msg);
-    } catch (err) {
-      const msg = `${attempt.label}: ${(err as Error).message}`;
-      log.warn(msg);
-      errors.push(msg);
-      onAttempt?.(msg);
-    }
-  }
-  if (errors.length) {
-    onAttempt?.(`All light-device renewals failed (${errors.length} attempts)`);
-  }
+  onAttempt?.(
+    "Light-device renewal is not supported by Vudu sessionKeyRequest — reconnect required"
+  );
+  void device;
+  void cookieHeader;
   return null;
 }
 

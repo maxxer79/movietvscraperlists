@@ -10,6 +10,8 @@ import {
   captureVuduAuthFromNetwork,
   extractVuduAuth,
   injectVuduAuthIntoLocalStorage,
+  mintVuduSessionWithPassword,
+  validateVuduAuth,
 } from "./vuduApi.js";
 import { dismissCookieBanner } from "./helpers.js";
 
@@ -21,6 +23,8 @@ interface ActiveLogin {
   context: BrowserContext;
   page: Page;
   createdAt: number;
+  /** Kept only for the duration of this login so we can mint a Vudu API sessionKey. */
+  creds?: LoginCredentials;
 }
 
 const active = new Map<string, ActiveLogin>();
@@ -49,14 +53,37 @@ async function saveScreenshot(page: Page, providerId: string, tag: string) {
 }
 
 /**
- * After a successful login, visit the library so Vudu writes session tokens,
- * then copy them into localStorage so Playwright storageState persists them
- * for fast API syncs (sessionStorage alone is not saved by Playwright).
+ * After a successful browser login, mint a fresh Vudu API sessionKey via
+ * password sessionKeyRequest (the only reliable method), then persist it into
+ * localStorage so Playwright storageState keeps it for fast syncs.
  */
 async function captureProviderAuth(login: ActiveLogin): Promise<void> {
   if (login.provider.id !== "fandango") return;
   try {
     const page = login.page;
+
+    // Prefer password mint — cookie/localStorage tokens are often already stale
+    // or never written for API use.
+    if (login.creds?.username && login.creds?.password) {
+      const minted = await mintVuduSessionWithPassword(
+        login.creds.username,
+        login.creds.password
+      );
+      if (minted) {
+        const ok = await validateVuduAuth(minted);
+        if (ok) {
+          await injectVuduAuthIntoLocalStorage(page, ok);
+          log.info(
+            `Minted Vudu API credentials for ${login.provider.id} (userId ${ok.userId.slice(0, 6)}…)`
+          );
+          return;
+        }
+        log.warn("Password-minted Vudu session failed validation — trying page capture");
+      } else {
+        log.warn("Password sessionKeyRequest failed — trying page/network capture");
+      }
+    }
+
     const networkAuthPromise = captureVuduAuthFromNetwork(page, 45_000);
     await page.goto("https://athome.fandango.com/content/browse/mymovies", {
       waitUntil: "domcontentloaded",
@@ -72,17 +99,21 @@ async function captureProviderAuth(login: ActiveLogin): Promise<void> {
       auth = (await extractVuduAuth(page)) || (await networkAuthPromise);
     }
     if (auth) {
-      await injectVuduAuthIntoLocalStorage(page, auth);
+      const ok = (await validateVuduAuth(auth)) || auth;
+      await injectVuduAuthIntoLocalStorage(page, ok);
       log.info(
-        `Captured Vudu API credentials for ${login.provider.id} (userId ${auth.userId.slice(0, 6)}…)`
+        `Captured Vudu API credentials for ${login.provider.id} (userId ${ok.userId.slice(0, 6)}…)`
       );
     } else {
       log.warn(
-        `Logged into ${login.provider.id} but could not find Vudu API credentials — sync will try network capture again`
+        `Logged into ${login.provider.id} but could not obtain Vudu API credentials — Sync will ask you to reconnect`
       );
     }
   } catch (err) {
     log.warn(`Could not capture Vudu auth after login for ${login.provider.id}`, err);
+  } finally {
+    // Do not keep the password around after finalize.
+    login.creds = undefined;
   }
 }
 
@@ -113,6 +144,7 @@ export async function startLogin(
     context,
     page,
     createdAt: Date.now(),
+    creds,
   };
 
   try {
