@@ -289,6 +289,7 @@ export function App() {
   }
 
   const connectedProviders = providers.filter((p) => p.itemCount > 0);
+  const filterableProviders = providers.length > 0 ? providers : connectedProviders;
 
   return (
     <div className="app">
@@ -348,7 +349,7 @@ export function App() {
           onChange={(e) => setFilterProvider(e.target.value)}
         >
           <option value="all">All services</option>
-          {connectedProviders.map((p) => (
+          {filterableProviders.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}
             </option>

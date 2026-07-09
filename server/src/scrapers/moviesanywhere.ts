@@ -17,6 +17,7 @@ import {
   looksLikeCodePrompt,
   parseQuality,
   parseYear,
+  splitTitleYear,
 } from "./helpers.js";
 import { createLogger } from "../logger.js";
 
@@ -387,7 +388,8 @@ export class MoviesAnywhereProvider implements Provider {
 
       let fresh = 0;
       for (const raw of batch) {
-        const title = raw.title.replace(/\s+/g, " ").trim();
+        const parsed = splitTitleYear(raw.title.replace(/\s+/g, " ").trim());
+        const title = parsed.title;
         if (!title) continue;
         if (/season|episode|series|tv show/i.test(title)) continue;
         const id =
@@ -398,7 +400,7 @@ export class MoviesAnywhereProvider implements Provider {
           id,
           title,
           type: "movie",
-          year: parseYear(raw.text) ?? parseYear(title),
+          year: parsed.year ?? parseYear(raw.text) ?? parseYear(raw.title),
           quality: parseQuality(raw.text),
           posterUrl: raw.poster,
           url: raw.href?.startsWith("http")

@@ -137,6 +137,19 @@ export function parseQuality(text: string | undefined): string | undefined {
 /** Extract a 4-digit year from text if present. */
 export function parseYear(text: string | undefined): number | undefined {
   if (!text) return undefined;
+  const paren = text.match(/\(\s*((?:19|20)\d{2})\s*\)\s*$/);
+  if (paren) return parseInt(paren[1]!, 10);
   const m = text.match(/\b(19|20)\d{2}\b/);
   return m ? parseInt(m[0], 10) : undefined;
+}
+
+/** Split "Movie Title (1999)" into title + year. */
+export function splitTitleYear(raw: string): { title: string; year?: number } {
+  const trimmed = raw.trim();
+  const paren = trimmed.match(/^(.*)\(\s*((?:19|20)\d{2})\s*\)\s*$/);
+  if (paren) {
+    return { title: paren[1]!.trim(), year: parseInt(paren[2]!, 10) };
+  }
+  const year = parseYear(trimmed);
+  return { title: trimmed, year };
 }

@@ -141,7 +141,7 @@ describe("mergeLibraries", () => {
     assert.equal(merged[0].retailers.length, 2);
   });
 
-  it("does not merge year-less titles on title-only fallback", () => {
+  it("does not merge two year-less titles with the same name", () => {
     const inputs: ProviderLibraryInput[] = [
       {
         providerId: "fandango",
@@ -156,5 +156,36 @@ describe("mergeLibraries", () => {
     ];
     const merged = mergeLibraries(inputs);
     assert.equal(merged.length, 2);
+  });
+
+  it("merges Fandango (with year) and Movies Anywhere (no year) for the same title", () => {
+    const inputs: ProviderLibraryInput[] = [
+      {
+        providerId: "fandango",
+        providerName: "Fandango at Home",
+        items: [
+          movie({
+            id: "f1",
+            title: "10 Things I Hate About You",
+            year: 1999,
+            quality: "HDX",
+            posterUrl: "https://example.com/poster.jpg",
+          }),
+        ],
+      },
+      {
+        providerId: "moviesanywhere",
+        providerName: "Movies Anywhere",
+        items: [movie({ id: "ma1", title: "10 Things I Hate About You" })],
+      },
+    ];
+    const merged = mergeLibraries(inputs);
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].year, 1999);
+    assert.equal(merged[0].posterUrl, "https://example.com/poster.jpg");
+    assert.deepEqual(
+      merged[0].retailers.map((r) => r.provider).sort(),
+      ["fandango", "moviesanywhere"]
+    );
   });
 });
