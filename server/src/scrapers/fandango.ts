@@ -57,7 +57,7 @@ export class FandangoProvider implements Provider {
     "https://athome.fandango.com/content/account/login?type=vudu_auth";
   readonly libraryUrl = "https://athome.fandango.com/content/browse/mymovies";
   readonly notes =
-    "Formerly Vudu. Connect mints a fresh API sessionKey (needed for Sync). If Sync says session expired, Disconnect and Connect again (complete any email code), then Sync.";
+    "Formerly Vudu. Connect must mint a fresh API sessionKey before Sync works. Do not Sync on an old connection — Disconnect, Connect (complete any email code), then Sync.";
 
   // Your purchased library lives on two dedicated pages. We scrape ONLY these,
   // so wishlist and other lists are ignored.
@@ -251,17 +251,19 @@ export class FandangoProvider implements Provider {
 
   /**
    * Lightweight sync: read saved session credentials and call the Vudu API directly.
-   * Returns null if credentials are missing OR expired so the caller can open a
-   * browser (which will fail fast and ask for reconnect if tokens cannot be reminted).
+   * Missing/expired API tokens cannot be refreshed without the password — fail with
+   * SessionExpiredError so the UI asks for Disconnect → Connect (no useless browser).
    */
   async scrapeFromStorageState(
     storageStateJson: string,
     onProgress?: (message: string, itemsFound?: number) => void
-  ): Promise<MediaItem[] | null> {
+  ): Promise<MediaItem[]> {
     const auth = extractVuduAuthFromStorageState(storageStateJson);
     if (!auth) {
-      onProgress?.("Could not read Vudu credentials from saved session");
-      return null;
+      onProgress?.("No Vudu API credentials in saved session — reconnect required");
+      throw new SessionExpiredError(
+        "No Vudu API sessionKey saved. Disconnect, Connect again (complete any email code) — Connect mints the API key — then Sync."
+      );
     }
     log.info(`Light Vudu API sync (userId ${auth.userId.slice(0, 6)}…)`);
     onProgress?.("Using fast API sync (no browser)…", 0);
@@ -270,11 +272,13 @@ export class FandangoProvider implements Provider {
     } catch (err) {
       if (err instanceof SessionExpiredError) {
         onProgress?.(
-          "Saved API tokens expired — opening browser (reconnect will be required if they cannot be refreshed)…",
+          "Saved API tokens expired — reconnect required (browser cannot refresh them without your password)",
           0
         );
-        log.warn("Light API sync hit expired session — falling back to browser");
-        return null;
+        log.warn("Light API sync hit expired session — asking user to reconnect");
+        throw new SessionExpiredError(
+          "Fandango API session expired. Disconnect, Connect again (complete any email code) — Connect mints a fresh API key — then Sync."
+        );
       }
       throw err;
     }

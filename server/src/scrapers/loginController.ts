@@ -10,8 +10,10 @@ import {
   captureVuduAuthFromNetwork,
   extractVuduAuth,
   injectVuduAuthIntoLocalStorage,
+  injectVuduAuthIntoStorageState,
   mintVuduSessionWithPassword,
   validateVuduAuth,
+  type VuduAuth,
 } from "./vuduApi.js";
 import { dismissCookieBanner } from "./helpers.js";
 
@@ -55,10 +57,10 @@ async function saveScreenshot(page: Page, providerId: string, tag: string) {
 /**
  * After a successful browser login, mint a fresh Vudu API sessionKey via
  * password sessionKeyRequest (the only reliable method), then persist it into
- * localStorage so Playwright storageState keeps it for fast syncs.
+ * localStorage / storageState so Sync can use the fast API path.
  */
-async function captureProviderAuth(login: ActiveLogin): Promise<void> {
-  if (login.provider.id !== "fandango") return;
+async function captureProviderAuth(login: ActiveLogin): Promise<VuduAuth | null> {
+  if (login.provider.id !== "fandango") return null;
   try {
     const page = login.page;
 
@@ -72,11 +74,13 @@ async function captureProviderAuth(login: ActiveLogin): Promise<void> {
       if (minted) {
         const ok = await validateVuduAuth(minted);
         if (ok) {
-          await injectVuduAuthIntoLocalStorage(page, ok);
+          await injectVuduAuthIntoLocalStorage(page, ok).catch((err) => {
+            log.warn("Could not inject minted auth into page localStorage", err);
+          });
           log.info(
             `Minted Vudu API credentials for ${login.provider.id} (userId ${ok.userId.slice(0, 6)}…)`
           );
-          return;
+          return ok;
         }
         log.warn("Password-minted Vudu session failed validation — trying page capture");
       } else {
@@ -100,29 +104,47 @@ async function captureProviderAuth(login: ActiveLogin): Promise<void> {
     }
     if (auth) {
       const ok = (await validateVuduAuth(auth)) || auth;
-      await injectVuduAuthIntoLocalStorage(page, ok);
+      await injectVuduAuthIntoLocalStorage(page, ok).catch(() => {});
       log.info(
         `Captured Vudu API credentials for ${login.provider.id} (userId ${ok.userId.slice(0, 6)}…)`
       );
-    } else {
-      log.warn(
-        `Logged into ${login.provider.id} but could not obtain Vudu API credentials — Sync will ask you to reconnect`
-      );
+      return ok;
     }
+    log.warn(
+      `Logged into ${login.provider.id} but could not obtain Vudu API credentials`
+    );
+    return null;
   } catch (err) {
     log.warn(`Could not capture Vudu auth after login for ${login.provider.id}`, err);
+    return null;
   } finally {
     // Do not keep the password around after finalize.
     login.creds = undefined;
   }
 }
 
-async function finalize(login: ActiveLogin): Promise<void> {
-  await captureProviderAuth(login);
-  const storageState = JSON.stringify(await login.context.storageState());
+async function finalize(login: ActiveLogin): Promise<LoginStep> {
+  const auth = await captureProviderAuth(login);
+  let storageState = JSON.stringify(await login.context.storageState());
+
+  if (login.provider.id === "fandango") {
+    if (!auth) {
+      await login.context.close().catch(() => {});
+      active.delete(login.loginId);
+      return {
+        status: "error",
+        message:
+          "Signed into Fandango, but could not mint a Vudu API sessionKey. Check email/password and try Connect again.",
+      };
+    }
+    // Patch storageState directly so Sync does not depend on page-origin localStorage.
+    storageState = injectVuduAuthIntoStorageState(storageState, auth);
+  }
+
   saveSession(login.provider.id, storageState);
   await login.context.close().catch(() => {});
   active.delete(login.loginId);
+  return { status: "success" };
 }
 
 export interface LoginResponse {
@@ -155,8 +177,7 @@ export async function startLogin(
       return { loginId, step };
     }
     if (step.status === "success") {
-      await finalize(login);
-      return { loginId, step };
+      return { loginId, step: await finalize(login) };
     }
     // need_input: keep the session alive for the next call
     active.set(loginId, login);
@@ -187,8 +208,9 @@ export async function submitInput(
   try {
     const step = await login.provider.submitInput(login.page, field, value);
     if (step.status === "success") {
-      await finalize(login);
-    } else if (step.status === "error") {
+      return await finalize(login);
+    }
+    if (step.status === "error") {
       await saveScreenshot(login.page, login.provider.id, "code-error");
     }
     return step;

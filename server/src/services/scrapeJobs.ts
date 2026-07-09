@@ -219,28 +219,24 @@ async function runScrapeJob(
       jobProgress(job, message, itemsFound !== undefined ? { itemsFound } : undefined);
     };
 
-    // Fandango: prefer direct Vudu API using saved session (no Chromium).
-    // If tokens are missing/expired, fall through to browser refresh below.
+    // Fandango: direct Vudu API only. Expired/missing tokens require Connect
+    // (password mint) — opening a browser cannot refresh them.
     if (provider.id === "fandango") {
       const items = await (provider as FandangoProvider).scrapeFromStorageState(
         storageState,
         onProgress
       );
-      if (items) {
-        const snapshot = saveLibrary(provider.id, items);
-        jobProgress(job, `Finished — saved ${snapshot.count} titles`, { itemsFound: snapshot.count });
-        updateJob(job, {
-          status: "done",
-          count: snapshot.count,
-          snapshot,
-          message: `Synced ${snapshot.count} titles`,
-          finishedAt: new Date().toISOString(),
-        });
-        log.info(`${provider.id} scrape job ${job.id} finished (light API): ${snapshot.count} items`);
-        return;
-      }
-      jobProgress(job, "Opening browser to refresh Fandango session…");
-      log.warn(`${provider.id}: light API path unavailable — refreshing via browser`);
+      const snapshot = saveLibrary(provider.id, items);
+      jobProgress(job, `Finished — saved ${snapshot.count} titles`, { itemsFound: snapshot.count });
+      updateJob(job, {
+        status: "done",
+        count: snapshot.count,
+        snapshot,
+        message: `Synced ${snapshot.count} titles`,
+        finishedAt: new Date().toISOString(),
+      });
+      log.info(`${provider.id} scrape job ${job.id} finished (light API): ${snapshot.count} items`);
+      return;
     }
 
     const context = await newContext(storageState);

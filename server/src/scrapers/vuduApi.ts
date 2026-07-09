@@ -450,9 +450,15 @@ export async function mintVuduSessionWithPassword(
   password: string,
   onAttempt?: (message: string) => void
 ): Promise<VuduAuth | null> {
-  const attempts: Array<{ claimedAppId: string; label: string }> = [
-    { claimedAppId: "myvudu", label: "myvudu + password" },
-    { claimedAppId: "html5app", label: "html5app + password" },
+  const attempts: Array<{
+    claimedAppId: string;
+    label: string;
+    method?: "GET" | "POST";
+  }> = [
+    { claimedAppId: "myvudu", label: "myvudu + password (GET)" },
+    { claimedAppId: "myvudu", label: "myvudu + password (POST)", method: "POST" },
+    { claimedAppId: "html5app", label: "html5app + password (GET)" },
+    { claimedAppId: "html5app", label: "html5app + password (POST)", method: "POST" },
   ];
 
   for (const attempt of attempts) {
@@ -468,7 +474,9 @@ export async function mintVuduSessionWithPassword(
         weakSeconds: "25920000",
         sensorData: "sensorData",
       });
-      const data = await vuduGet(params, `passwordLogin/${attempt.label}`);
+      const data = await vuduGet(params, `passwordLogin/${attempt.label}`, {
+        method: attempt.method ?? "GET",
+      });
       const auth = extractVuduAuthFromPayload(data);
       if (auth) {
         log.info(
