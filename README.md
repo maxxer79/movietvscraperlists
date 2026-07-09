@@ -10,9 +10,9 @@ Supported services:
 | --- | --- |
 | **Fandango at Home** | ✅ Implemented |
 | **Movies Anywhere** | ✅ Implemented (verify Connect/Sync with your account) |
-| **Apple TV** | 🚧 Framework ready (coming next) |
-| **Google Play / YouTube** | 🚧 Framework ready (coming next) |
-| **Prime Video** | 🚧 Framework ready (coming next) |
+| **Apple TV** | ✅ Implemented (verify Connect/Sync; selectors may need tuning) |
+| **Google Play / YouTube** | ✅ Implemented (verify Connect/Sync; selectors may need tuning) |
+| **Prime Video** | ✅ Implemented (purchased/owned movies; verify Connect/Sync) |
 
 > **How it works:** none of these services offer a public "list my library" API,
 > so the app logs in *as you* using a real browser engine (Playwright) and reads
