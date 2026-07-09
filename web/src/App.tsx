@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, clearToken } from "./api";
-import type { CombinedItem, ProviderStatus, SyncProgress } from "./types";
+import type { CombinedItem, ProviderStatus, RemovedItem, SyncProgress } from "./types";
 import { VersionBadge } from "./components/VersionBadge";
 import { ProviderCard } from "./components/ProviderCard";
 import { LoginModal } from "./components/LoginModal";
 import { MediaCard } from "./components/MediaCard";
 import { PasswordGate } from "./components/PasswordGate";
 import { AzNav, titleLetter } from "./components/AzNav";
+import { RemovedPanel } from "./components/RemovedPanel";
 
 export function App() {
   const [locked, setLocked] = useState(false);
@@ -18,6 +19,8 @@ export function App() {
   );
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [items, setItems] = useState<CombinedItem[]>([]);
+  const [removed, setRemoved] = useState<RemovedItem[]>([]);
+  const [libraryTab, setLibraryTab] = useState<"library" | "removed">("library");
   const [loginProvider, setLoginProvider] = useState<ProviderStatus | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [syncProgress, setSyncProgress] = useState<Record<string, SyncProgress>>({});
@@ -39,6 +42,7 @@ export function App() {
     const [p, lib] = await Promise.all([api.providers(), api.library()]);
     setProviders(p);
     setItems(lib.items);
+    setRemoved(lib.removed ?? []);
   }, []);
 
   useEffect(() => {
@@ -215,6 +219,34 @@ export function App() {
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  async function deleteItem(item: CombinedItem) {
+    if (
+      !confirm(
+        `Remove “${item.title}” from your library?\n\nIt will stay hidden on future Syncs until you undo it from Removed.`
+      )
+    ) {
+      return;
+    }
+    try {
+      await api.deleteItem(item.provider, item.id);
+      toast(`Removed “${item.title}”`);
+      await refresh();
+      setLibraryTab("removed");
+    } catch (err) {
+      toast((err as Error).message || "Could not remove title");
+    }
+  }
+
+  async function restoreItem(item: RemovedItem) {
+    try {
+      await api.restoreItem(item.provider, item.id);
+      toast(`“${item.title}” can return on the next Sync`);
+      await refresh();
+    } catch (err) {
+      toast((err as Error).message || "Could not restore title");
+    }
+  }
+
   function download(format: "csv" | "json") {
     const provider = filterProvider !== "all" ? filterProvider : undefined;
     window.open(api.exportUrl(format, provider), "_blank");
@@ -345,9 +377,29 @@ export function App() {
         Showing {filtered.length} of {items.length} titles ·{" "}
         {items.filter((i) => i.type === "movie").length} movies ·{" "}
         {items.filter((i) => i.type === "tv").length} TV
+        {removed.length > 0 ? ` · ${removed.length} removed` : ""}
       </p>
 
-      {filtered.length === 0 ? (
+      <div className="library-tabs">
+        <button
+          type="button"
+          className={`library-tab ${libraryTab === "library" ? "library-tab-active" : ""}`}
+          onClick={() => setLibraryTab("library")}
+        >
+          Library
+        </button>
+        <button
+          type="button"
+          className={`library-tab ${libraryTab === "removed" ? "library-tab-active" : ""}`}
+          onClick={() => setLibraryTab("removed")}
+        >
+          Removed{removed.length > 0 ? ` (${removed.length})` : ""}
+        </button>
+      </div>
+
+      {libraryTab === "removed" ? (
+        <RemovedPanel items={removed} onRestore={restoreItem} />
+      ) : filtered.length === 0 ? (
         <div className="empty">
           <div className="big">🍿</div>
           <p>
@@ -358,7 +410,6 @@ export function App() {
         </div>
       ) : (
         <div className="library-layout">
-          <AzNav available={azLetters} onJump={jumpToLetter} />
           <div className="library-grid">
             {filtered.map((item, index) => {
               const letter = titleLetter(item.title);
@@ -374,11 +425,13 @@ export function App() {
                   <MediaCard
                     item={item}
                     showProvider={filterProvider === "all"}
+                    onDelete={deleteItem}
                   />
                 </div>
               );
             })}
           </div>
+          <AzNav available={azLetters} onJump={jumpToLetter} />
         </div>
       )}
 

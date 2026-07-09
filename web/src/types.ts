@@ -41,6 +41,21 @@ export interface CombinedItem extends MediaItem {
   providerName: string;
 }
 
+export interface RemovedItem {
+  id: string;
+  title: string;
+  type: "movie" | "tv" | "unknown";
+  year?: number;
+  quality?: string;
+  posterUrl?: string;
+  url?: string;
+  removedAt: string;
+  reason: "sync" | "manual";
+  lastSeenAt?: string;
+  provider: string;
+  providerName: string;
+}
+
 export type LoginStep =
   | { status: "success" }
   | { status: "need_input"; field: string; prompt: string }

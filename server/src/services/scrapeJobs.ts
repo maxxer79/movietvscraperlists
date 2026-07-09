@@ -5,7 +5,7 @@ import { getProvider } from "../scrapers/registry.js";
 import { SessionExpiredError } from "../scrapers/types.js";
 import { FandangoProvider } from "../scrapers/fandango.js";
 import { newContext } from "./browser.js";
-import { saveLibrary, type LibrarySnapshot } from "./libraryStore.js";
+import { loadLibrary, saveLibraryFromSync, type LibrarySnapshot } from "./libraryStore.js";
 import { clearSession, loadSession } from "./sessionStore.js";
 import { paths } from "./paths.js";
 import { appendJobLog } from "./syncLog.js";
@@ -207,6 +207,32 @@ function jobProgress(
   updateJob(job, { message, ...extra });
 }
 
+function finishSyncJob(
+  job: ScrapeJob,
+  providerId: string,
+  snapshot: LibrarySnapshot,
+  previousItemIds: Set<string>
+): void {
+  const newlyRemoved = (snapshot.removed ?? []).filter(
+    (r) => r.reason === "sync" && previousItemIds.has(r.id)
+  ).length;
+  const message =
+    newlyRemoved > 0
+      ? `Synced ${snapshot.count} titles — ${newlyRemoved} removed since last sync`
+      : `Synced ${snapshot.count} titles`;
+  jobProgress(job, `Finished — saved ${snapshot.count} titles`, { itemsFound: snapshot.count });
+  updateJob(job, {
+    status: "done",
+    count: snapshot.count,
+    snapshot,
+    message,
+    finishedAt: new Date().toISOString(),
+  });
+  log.info(
+    `${providerId} scrape job ${job.id} finished: ${snapshot.count} items (${newlyRemoved} newly removed)`
+  );
+}
+
 async function runScrapeJob(
   job: ScrapeJob,
   provider: NonNullable<ReturnType<typeof getProvider>>,
@@ -219,6 +245,10 @@ async function runScrapeJob(
       jobProgress(job, message, itemsFound !== undefined ? { itemsFound } : undefined);
     };
 
+    const previousItemIds = new Set(
+      (loadLibrary(provider.id)?.items ?? []).map((i) => i.id)
+    );
+
     // Fandango: direct Vudu API only. Expired/missing tokens require Connect
     // (password mint) — opening a browser cannot refresh them.
     if (provider.id === "fandango") {
@@ -226,32 +256,16 @@ async function runScrapeJob(
         storageState,
         onProgress
       );
-      const snapshot = saveLibrary(provider.id, items);
-      jobProgress(job, `Finished — saved ${snapshot.count} titles`, { itemsFound: snapshot.count });
-      updateJob(job, {
-        status: "done",
-        count: snapshot.count,
-        snapshot,
-        message: `Synced ${snapshot.count} titles`,
-        finishedAt: new Date().toISOString(),
-      });
-      log.info(`${provider.id} scrape job ${job.id} finished (light API): ${snapshot.count} items`);
+      const snapshot = saveLibraryFromSync(provider.id, items);
+      finishSyncJob(job, provider.id, snapshot, previousItemIds);
       return;
     }
 
     const context = await newContext(storageState);
     try {
       const items = await provider.scrapeLibrary(context, onProgress);
-      const snapshot = saveLibrary(provider.id, items);
-      jobProgress(job, `Finished — saved ${snapshot.count} titles`, { itemsFound: snapshot.count });
-      updateJob(job, {
-        status: "done",
-        count: snapshot.count,
-        snapshot,
-        message: `Synced ${snapshot.count} titles`,
-        finishedAt: new Date().toISOString(),
-      });
-      log.info(`${provider.id} scrape job ${job.id} finished: ${snapshot.count} items`);
+      const snapshot = saveLibraryFromSync(provider.id, items);
+      finishSyncJob(job, provider.id, snapshot, previousItemIds);
     } finally {
       await context.close().catch(() => {});
     }

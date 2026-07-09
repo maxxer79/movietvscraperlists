@@ -2,6 +2,7 @@ import type {
   CombinedItem,
   LoginStep,
   ProviderStatus,
+  RemovedItem,
   ScrapeJobStatus,
   VersionInfo,
 } from "./types";
@@ -108,7 +109,22 @@ export const api = {
       `/api/providers/${id}/scrape/status?jobId=${encodeURIComponent(jobId)}`
     ),
   library: () =>
-    req<{ count: number; items: CombinedItem[] }>("/api/library"),
+    req<{
+      count: number;
+      items: CombinedItem[];
+      removedCount?: number;
+      removed?: RemovedItem[];
+    }>("/api/library"),
+  deleteItem: (providerId: string, itemId: string) =>
+    req<{ ok: boolean; count: number }>(
+      `/api/library/${encodeURIComponent(providerId)}/${encodeURIComponent(itemId)}`,
+      { method: "DELETE" }
+    ),
+  restoreItem: (providerId: string, itemId: string) =>
+    req<{ ok: boolean }>(
+      `/api/library/${encodeURIComponent(providerId)}/${encodeURIComponent(itemId)}/restore`,
+      { method: "POST" }
+    ),
   exportUrl: (format: "csv" | "json", provider?: string) => {
     const p = new URLSearchParams({ format });
     if (provider) p.set("provider", provider);

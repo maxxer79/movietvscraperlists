@@ -4,9 +4,11 @@ import { useState } from "react";
 export function MediaCard({
   item,
   showProvider,
+  onDelete,
 }: {
   item: CombinedItem;
   showProvider: boolean;
+  onDelete?: (item: CombinedItem) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const is4k = item.quality?.includes("4K");
@@ -15,6 +17,20 @@ export function MediaCard({
 
   return (
     <div className={`media-card ${isCollection ? "media-card-collection" : ""}`}>
+      {onDelete ? (
+        <button
+          type="button"
+          className="media-delete"
+          title="Remove from library"
+          aria-label={`Remove ${item.title}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(item);
+          }}
+        >
+          ×
+        </button>
+      ) : null}
       {item.posterUrl ? (
         <img
           className="poster"
