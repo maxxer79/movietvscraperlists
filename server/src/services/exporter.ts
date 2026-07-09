@@ -1,4 +1,5 @@
 import type { MediaItem } from "../scrapers/types.js";
+import type { MergedItem } from "./libraryMerge.js";
 
 function csvCell(value: unknown): string {
   const s = value === undefined || value === null ? "" : String(value);
@@ -95,6 +96,22 @@ export function toCsv(
       csvCell(item.url),
       csvCell(item.posterUrl),
       csvCell(item.fromCollection),
+    ].join(",")
+  );
+  return [headers.join(","), ...rows].join("\r\n");
+}
+
+export function toMergedCsv(items: MergedItem[]): string {
+  const headers = ["Title", "Type", "Year", "Quality", "Retailers", "URL", "Poster"];
+  const rows = items.map((item) =>
+    [
+      csvCell(item.title),
+      csvCell(item.type),
+      csvCell(item.year),
+      csvCell(item.quality),
+      csvCell(item.retailers.map((r) => r.providerName).join("; ")),
+      csvCell(item.url),
+      csvCell(item.posterUrl),
     ].join(",")
   );
   return [headers.join(","), ...rows].join("\r\n");
