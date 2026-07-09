@@ -450,15 +450,10 @@ export async function mintVuduSessionWithPassword(
   password: string,
   onAttempt?: (message: string) => void
 ): Promise<VuduAuth | null> {
-  const attempts: Array<{
-    claimedAppId: string;
-    label: string;
-    method?: "GET" | "POST";
-  }> = [
-    { claimedAppId: "myvudu", label: "myvudu + password (GET)" },
-    { claimedAppId: "myvudu", label: "myvudu + password (POST)", method: "POST" },
-    { claimedAppId: "html5app", label: "html5app + password (GET)" },
-    { claimedAppId: "html5app", label: "html5app + password (POST)", method: "POST" },
+  // Classic Vudu clients use GET with query params (POST without a query string is rejected).
+  const attempts: Array<{ claimedAppId: string; label: string }> = [
+    { claimedAppId: "myvudu", label: "myvudu + password" },
+    { claimedAppId: "html5app", label: "html5app + password" },
   ];
 
   for (const attempt of attempts) {
@@ -474,9 +469,7 @@ export async function mintVuduSessionWithPassword(
         weakSeconds: "25920000",
         sensorData: "sensorData",
       });
-      const data = await vuduGet(params, `passwordLogin/${attempt.label}`, {
-        method: attempt.method ?? "GET",
-      });
+      const data = await vuduGet(params, `passwordLogin/${attempt.label}`);
       const auth = extractVuduAuthFromPayload(data);
       if (auth) {
         log.info(
@@ -973,8 +966,9 @@ async function vuduGet(
   let res: Response;
   try {
     if (method === "POST") {
+      // Vudu rejects body-only form posts ("Form Post requires a query").
       headers["Content-Type"] = "application/x-www-form-urlencoded";
-      res = await fetch(API_BASE, {
+      res = await fetch(`${API_BASE}?${params.toString()}`, {
         method: "POST",
         signal: AbortSignal.timeout(60_000),
         headers,

@@ -54,69 +54,90 @@ async function saveScreenshot(page: Page, providerId: string, tag: string) {
   }
 }
 
+interface AuthCaptureResult {
+  auth: VuduAuth | null;
+  /** Human-readable reason when auth is null (shown in Connect error). */
+  detail?: string;
+}
+
 /**
  * After a successful browser login, mint a fresh Vudu API sessionKey via
- * password sessionKeyRequest (the only reliable method), then persist it into
- * localStorage / storageState so Sync can use the fast API path.
+ * password sessionKeyRequest. Page/localStorage tokens are often already dead —
+ * never persist them unless they pass API validation.
  */
-async function captureProviderAuth(login: ActiveLogin): Promise<VuduAuth | null> {
-  if (login.provider.id !== "fandango") return null;
+async function captureProviderAuth(login: ActiveLogin): Promise<AuthCaptureResult> {
+  if (login.provider.id !== "fandango") return { auth: null };
+  const attempts: string[] = [];
   try {
     const page = login.page;
 
-    // Prefer password mint — cookie/localStorage tokens are often already stale
-    // or never written for API use.
-    if (login.creds?.username && login.creds?.password) {
-      const minted = await mintVuduSessionWithPassword(
-        login.creds.username,
-        login.creds.password
-      );
-      if (minted) {
-        const ok = await validateVuduAuth(minted);
-        if (ok) {
-          await injectVuduAuthIntoLocalStorage(page, ok).catch((err) => {
-            log.warn("Could not inject minted auth into page localStorage", err);
-          });
-          log.info(
-            `Minted Vudu API credentials for ${login.provider.id} (userId ${ok.userId.slice(0, 6)}…)`
-          );
-          return ok;
-        }
-        log.warn("Password-minted Vudu session failed validation — trying page capture");
-      } else {
-        log.warn("Password sessionKeyRequest failed — trying page/network capture");
-      }
+    if (!login.creds?.username || !login.creds?.password) {
+      return {
+        auth: null,
+        detail: "Password was not available to mint a Vudu API sessionKey.",
+      };
     }
 
-    const networkAuthPromise = captureVuduAuthFromNetwork(page, 45_000);
+    const minted = await mintVuduSessionWithPassword(
+      login.creds.username,
+      login.creds.password,
+      (msg) => attempts.push(msg)
+    );
+    if (minted) {
+      const ok = await validateVuduAuth(minted);
+      if (ok) {
+        await injectVuduAuthIntoLocalStorage(page, ok).catch((err) => {
+          log.warn("Could not inject minted auth into page localStorage", err);
+        });
+        log.info(
+          `Minted Vudu API credentials for ${login.provider.id} (userId ${ok.userId.slice(0, 6)}…)`
+        );
+        return { auth: ok };
+      }
+      attempts.push("Password mint returned a sessionKey that failed API validation");
+      log.warn("Password-minted Vudu session failed validation");
+    } else {
+      log.warn("Password sessionKeyRequest failed");
+    }
+
+    // Last resort: only keep page/network tokens if they actually work against the API.
+    const networkAuthPromise = captureVuduAuthFromNetwork(page, 20_000);
     await page.goto("https://athome.fandango.com/content/browse/mymovies", {
       waitUntil: "domcontentloaded",
       timeout: 60_000,
     });
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(2000);
     await dismissCookieBanner(page);
 
     let auth = await extractVuduAuth(page);
     if (!auth) {
-      await page.evaluate(() => window.scrollBy(0, 600)).catch(() => {});
-      await page.waitForTimeout(2000);
       auth = (await extractVuduAuth(page)) || (await networkAuthPromise);
     }
     if (auth) {
-      const ok = (await validateVuduAuth(auth)) || auth;
-      await injectVuduAuthIntoLocalStorage(page, ok).catch(() => {});
-      log.info(
-        `Captured Vudu API credentials for ${login.provider.id} (userId ${ok.userId.slice(0, 6)}…)`
-      );
-      return ok;
+      const ok = await validateVuduAuth(auth);
+      if (ok) {
+        await injectVuduAuthIntoLocalStorage(page, ok).catch(() => {});
+        log.info(
+          `Captured validated Vudu API credentials for ${login.provider.id} (userId ${ok.userId.slice(0, 6)}…)`
+        );
+        return { auth: ok };
+      }
+      attempts.push("Page/localStorage tokens were present but rejected by the API");
+      log.warn("Page-captured Vudu tokens failed validation — not saving them");
+    } else {
+      attempts.push("No sessionKey found in page storage or network traffic");
     }
-    log.warn(
-      `Logged into ${login.provider.id} but could not obtain Vudu API credentials`
-    );
-    return null;
+
+    return {
+      auth: null,
+      detail: attempts.slice(-4).join(" · ") || "Could not mint a usable Vudu API sessionKey",
+    };
   } catch (err) {
     log.warn(`Could not capture Vudu auth after login for ${login.provider.id}`, err);
-    return null;
+    return {
+      auth: null,
+      detail: (err as Error).message || "Unexpected error while minting API session",
+    };
   } finally {
     // Do not keep the password around after finalize.
     login.creds = undefined;
@@ -124,7 +145,7 @@ async function captureProviderAuth(login: ActiveLogin): Promise<VuduAuth | null>
 }
 
 async function finalize(login: ActiveLogin): Promise<LoginStep> {
-  const auth = await captureProviderAuth(login);
+  const { auth, detail } = await captureProviderAuth(login);
   let storageState = JSON.stringify(await login.context.storageState());
 
   if (login.provider.id === "fandango") {
@@ -134,7 +155,9 @@ async function finalize(login: ActiveLogin): Promise<LoginStep> {
       return {
         status: "error",
         message:
-          "Signed into Fandango, but could not mint a Vudu API sessionKey. Check email/password and try Connect again.",
+          "Signed into Fandango, but could not mint a usable Vudu API sessionKey. " +
+          "Sync needs this key. Try Connect again with the same email/password" +
+          (detail ? ` (${detail})` : "."),
       };
     }
     // Patch storageState directly so Sync does not depend on page-origin localStorage.
